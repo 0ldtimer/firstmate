@@ -40,10 +40,6 @@ process_is_harness() {
 harness_pid() {
   local pid=$$ comm args
   if [ -n "${FM_HARNESS_OWNER_PID:-}" ]; then
-    if [ "${CODEX_SHELL:-}" != 1 ]; then
-      echo "error: FM_HARNESS_OWNER_PID requires a verified Codex session marker" >&2
-      return 1
-    fi
     case "$FM_HARNESS_OWNER_PID" in
       *[!0-9]*|'') echo "error: FM_HARNESS_OWNER_PID must be a process id" >&2; return 1 ;;
     esac

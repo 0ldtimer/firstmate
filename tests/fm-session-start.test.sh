@@ -272,7 +272,7 @@ SH
 
   for owner in not-a-pid 1 999999 "$$"; do
     status=0
-    out=$(CODEX_SHELL=1 FM_HOME="$home" FM_HARNESS_OWNER_PID="$owner" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+    out=$(FM_HOME="$home" FM_HARNESS_OWNER_PID="$owner" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
     expect_code 1 "$status" "invalid explicit harness owner '$owner' must fail acquisition"
     assert_contains "$out" "FM_HARNESS_OWNER_PID" "invalid explicit harness owner '$owner' did not explain the failure"
     assert_not_contains "$out" "cannot locate harness process in ancestry" "invalid explicit harness owner '$owner' added a false ancestry diagnosis"
@@ -290,7 +290,7 @@ $rec
 EOF
   make_fake_ps_harness "$fakebin" claude
   status=0
-  out=$(CODEX_SHELL=1 FM_FAKE_HARNESS=claude FM_HOME="$home" FM_HARNESS_OWNER_PID="$$" \
+  out=$(FM_FAKE_HARNESS=claude FM_HOME="$home" FM_HARNESS_OWNER_PID="$$" \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 1 "$status" "Codex must reject an explicit owner from another harness"
   assert_contains "$out" "not a live Codex harness process" "cross-harness owner mismatch was not diagnosed"
@@ -308,7 +308,7 @@ EOF
   node -e 'setTimeout(() => {}, 300000)' codex-owner </dev/null >/dev/null 2>&1 &
   owner_pid=$!
 
-  out=$(CODEX_SHELL=1 FM_HOME="$home" FM_HARNESS_OWNER_PID="$owner_pid" "$ROOT/bin/fm-lock.sh")
+  out=$(FM_HOME="$home" FM_HARNESS_OWNER_PID="$owner_pid" "$ROOT/bin/fm-lock.sh")
   assert_contains "$out" "lock acquired: harness pid $owner_pid" "real explicit owner process did not acquire the fleet lock"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
   assert_contains "$out" "lock: held by live harness pid $owner_pid" "real explicit owner process was not reported live"
