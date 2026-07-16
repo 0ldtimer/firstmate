@@ -6,5 +6,3 @@ Source: LFG review of the `fm-bridge.v1` walking skeleton on 2026-07-16.
   Replace the narrow atomic directory lock with FirstMate's owner-aware lock primitive and stale-owner recovery.
 - P2 - `bin/fm-bridge.sh` - Guarded merge is intentionally unsupported in the first protocol slice.
   Add it only for a project mode that can return an authoritative structured outcome.
-- P3 - Local verification could not run `bin/fm-lint.sh` because ShellCheck 0.11.0 is not installed.
-  CI remains the authoritative ShellCheck gate.
