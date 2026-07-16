@@ -246,3 +246,10 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
+# Bridge protocol boundary
+
+The `fm-bridge.v1` protocol is an anti-corruption layer over FirstMate's authoritative fleet state.
+It reuses the read-only fleet snapshot and derives client-facing revisions without making terminal prose authoritative.
+Command outcomes are journaled atomically under the active FirstMate home so connectivity retries cannot duplicate an accepted action.
+Clients must refresh after stale revisions and must treat absent capabilities as unavailable actions.
+Review sign-off and delivery merge are deliberately separate commands.

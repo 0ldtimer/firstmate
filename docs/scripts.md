@@ -75,3 +75,12 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+# Captain's Log Bridge
+
+`bin/fm-bridge.sh` is the supported local machine boundary for voice-first fleet clients.
+It reads one `fm-bridge.v1` JSON request from standard input.
+The `snapshot` operation projects stable task identities, revisions, evidence pointers, freshness, and legal capabilities from `fm-fleet-snapshot.v1`.
+The `command` operation requires a command ID, opaque task ID, and expected task revision.
+Repeated identical command IDs replay their original outcome, while reuse with a different request fails closed.
+Sign-off is a review decision and never implies merge.
+Merge remains unavailable unless FirstMate can route it through a guarded project mode.
