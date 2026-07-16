@@ -244,12 +244,18 @@ LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
 printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0
+LOCK_HELD_BY_OTHER=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
+  [ "$LOCK_RC" -eq 2 ] && LOCK_HELD_BY_OTHER=1
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+    if [ "$LOCK_HELD_BY_OTHER" -eq 1 ]; then
+      printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+    else
+      printf '●  READ-ONLY SESSION - FLEET LOCK COULD NOT BE ACQUIRED\n'
+    fi
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
@@ -285,7 +291,11 @@ subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
-  printf 'skipped (read-only session) - %s record(s) remain queued for the session holding the lock.\n' "$QLEN"
+  if [ "$LOCK_HELD_BY_OTHER" -eq 1 ]; then
+    printf 'skipped (read-only session) - %s record(s) remain queued for the session holding the lock.\n' "$QLEN"
+  else
+    printf 'skipped (read-only session) - %s record(s) remain queued until lock acquisition succeeds.\n' "$QLEN"
+  fi
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
@@ -386,12 +396,21 @@ fi
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
-  cat <<'EOF'
+  if [ "$LOCK_HELD_BY_OTHER" -eq 1 ]; then
+    cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. The session
 holding the lock owns mutable follow-up.
 
 EOF
+  else
+    cat <<'EOF'
+This session did not acquire the fleet lock. Stay read-only: do not arm,
+drain, spawn, steer, merge, or repair fleet state from here. Resolve the
+lock-acquisition diagnostic above, then start a fresh session.
+
+EOF
+  fi
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
 Away mode is active. Follow the supervision operating instructions block above:
