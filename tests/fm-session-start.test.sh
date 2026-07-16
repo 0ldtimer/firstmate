@@ -187,15 +187,164 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
+# Markers today: CLAUDECODE (claude), CODEX_SHELL (codex),
+# PI_CODING_AGENT (pi), GROK_AGENT (grok). Without this, a local harness
+# session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  env -u CLAUDECODE -u CODEX_SHELL -u PI_CODING_AGENT -u GROK_AGENT \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START"
+}
+
+test_explicit_codex_owner_acquires_lock_without_harness_ancestry() {
+  local rec root home fakebin out owner_pid status
+  rec=$(new_world explicit-codex-owner)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  owner_pid=$$
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+pid=""
+prev=""
+for arg in "\$@"; do
+  [ "\$prev" = "-p" ] && pid="\$arg"
+  prev="\$arg"
+done
+case "\$*" in
+  *"comm="*)
+    [ "\$pid" = "$owner_pid" ] && printf '%s\n' '/usr/local/bin/codex' || printf '%s\n' '-zsh'
+    exit 0
+    ;;
+  *"args="*)
+    [ "\$pid" = "$owner_pid" ] && printf '%s\n' 'codex' || printf '%s\n' '-zsh'
+    exit 0
+    ;;
+  *"ppid="*) printf '%s\n' 1; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_SHELL=1 FM_HARNESS_OWNER_PID="$owner_pid" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START")
+
+  assert_contains "$out" "lock acquired: harness pid $owner_pid" "explicit Codex owner did not acquire the fleet lock"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "Codex environment marker did not identify the primary harness"
+  [ "$(cat "$home/state/.lock")" = "$owner_pid" ] || fail "fleet lock did not record the explicit Codex owner"
+  assert_not_contains "$out" "basename: illegal option" "login-shell command names were passed to basename as options"
+
+  status=0
+  out=$(CODEX_SHELL=1 FM_HARNESS_OWNER_PID="$owner_pid" FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 2 "$status" "a second caller reusing the explicit owner PID must be refused"
+  assert_contains "$out" "another live firstmate session holds the lock" "reused explicit owner PID did not report contention"
+  pass "an explicit live Codex owner acquires the lock without process ancestry"
+}
+
+test_explicit_harness_owner_rejects_invalid_processes() {
+  local rec root home fakebin out status
+  rec=$(new_world invalid-explicit-owner)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-p" ] && pid="$arg"
+  prev="$arg"
+done
+[ "$pid" = 999999 ] && exit 1
+case "$*" in
+  *"comm="*) printf '%s\n' '/bin/zsh'; exit 0 ;;
+  *"args="*) printf '%s\n' 'zsh'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  for owner in not-a-pid 1 999999 "$$"; do
+    status=0
+    out=$(CODEX_SHELL=1 FM_HOME="$home" FM_HARNESS_OWNER_PID="$owner" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+    expect_code 1 "$status" "invalid explicit harness owner '$owner' must fail acquisition"
+    assert_contains "$out" "FM_HARNESS_OWNER_PID" "invalid explicit harness owner '$owner' did not explain the failure"
+    assert_not_contains "$out" "cannot locate harness process in ancestry" "invalid explicit harness owner '$owner' added a false ancestry diagnosis"
+    assert_absent "$home/state/.lock" "invalid explicit harness owner '$owner' created a fleet lock"
+  done
+
+  pass "malformed, system, missing, and live non-harness owner PIDs fail closed"
+}
+
+test_codex_owner_rejects_a_different_harness_pid() {
+  local rec root home fakebin out status
+  rec=$(new_world codex-owner-mismatch)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_harness "$fakebin" claude
+  status=0
+  out=$(CODEX_SHELL=1 FM_FAKE_HARNESS=claude FM_HOME="$home" FM_HARNESS_OWNER_PID="$$" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 1 "$status" "Codex must reject an explicit owner from another harness"
+  assert_contains "$out" "not a live Codex harness process" "cross-harness owner mismatch was not diagnosed"
+  assert_absent "$home/state/.lock" "cross-harness owner mismatch created a fleet lock"
+
+  pass "Codex explicit ownership rejects another harness PID"
+}
+
+test_explicit_owner_tracks_a_real_process_lifecycle() {
+  local rec root home fakebin owner_pid out
+  rec=$(new_world real-explicit-owner)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  node -e 'setTimeout(() => {}, 300000)' codex-owner </dev/null >/dev/null 2>&1 &
+  owner_pid=$!
+
+  out=$(CODEX_SHELL=1 FM_HOME="$home" FM_HARNESS_OWNER_PID="$owner_pid" "$ROOT/bin/fm-lock.sh")
+  assert_contains "$out" "lock acquired: harness pid $owner_pid" "real explicit owner process did not acquire the fleet lock"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid $owner_pid" "real explicit owner process was not reported live"
+
+  kill "$owner_pid" 2>/dev/null || true
+  wait "$owner_pid" 2>/dev/null || true
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" "exited explicit owner process did not make the lock stale"
+
+  pass "explicit ownership follows a real harness-named process lifecycle"
+}
+
+test_harness_detection_failure_is_not_reported_as_live_lock_holder() {
+  local rec root home fakebin out
+  rec=$(new_world harness-detection-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*|*"args="*) printf '%s\n' '-zsh'; exit 0 ;;
+  *"ppid="*) printf '%s\n' 1; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "READ-ONLY SESSION - FLEET LOCK COULD NOT BE ACQUIRED" "harness detection failure did not get the generic lock failure heading"
+  assert_contains "$out" "cannot locate harness process in ancestry" "harness detection failure was not preserved"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION" "harness detection failure was mislabeled as a live lock holder"
+  assert_not_contains "$out" "session holding the lock owns" "next step invented a competing lock owner"
+  pass "a harness detection failure is distinct from a live lock refusal"
 }
 
 hash_file_for_test() {
@@ -741,6 +890,11 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_explicit_codex_owner_acquires_lock_without_harness_ancestry
+test_explicit_harness_owner_rejects_invalid_processes
+test_codex_owner_rejects_a_different_harness_pid
+test_explicit_owner_tracks_a_real_process_lifecycle
+test_harness_detection_failure_is_not_reported_as_live_lock_holder
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
