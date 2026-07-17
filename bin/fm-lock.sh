@@ -104,9 +104,14 @@ if [ -n "${FM_CODEX_SESSION_TOKEN:-}" ]; then
   esac
   [ "$FM_HARNESS_OWNER_PID" -gt 1 ] \
     || { echo "error: Codex launcher PID must be greater than one" >&2; exit 1; }
-  if ! mkdir "$TOKEN_CLAIM" 2>/dev/null; then
-    echo "error: another live firstmate session holds the lock; operate read-only until resolved" >&2
-    exit 2
+  claim_error=""
+  if ! claim_error=$(mkdir "$TOKEN_CLAIM" 2>&1); then
+    if [ -d "$TOKEN_CLAIM" ]; then
+      echo "error: another live firstmate session holds the lock; operate read-only until resolved" >&2
+      exit 2
+    fi
+    echo "error: could not create Codex fleet-lock claim: $claim_error" >&2
+    exit 1
   fi
   if ! printf '%s\n' "$FM_HARNESS_OWNER_PID" > "$LOCK" \
     || ! printf '%s\n' "$FM_CODEX_SESSION_TOKEN" > "$TOKEN_LOCK"; then

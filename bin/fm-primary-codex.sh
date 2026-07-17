@@ -36,4 +36,4 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-"$codex_bin" "$@"
+"$codex_bin" --add-dir "$FM_HOME" "$@"

@@ -415,6 +415,26 @@ SH
   pass "Codex token ownership works without process visibility and releases safely"
 }
 
+test_codex_claim_creation_failure_is_not_reported_as_contention() {
+  local rec root home fakebin token out status
+  rec=$(new_world codex-claim-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  token=0123456789abcdef0123456789abcdef
+  mkdir -p "$home/state"
+  : > "$home/state/.lock-claim"
+
+  status=0
+  out=$(FM_CODEX_SESSION_TOKEN="$token" FM_HARNESS_OWNER_PID="$$" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 1 "$status" "a non-contention claim failure must be an acquisition error"
+  assert_contains "$out" "could not create Codex fleet-lock claim" "claim creation failure was not diagnosed"
+  assert_not_contains "$out" "another live firstmate session" "claim creation failure was mislabeled as contention"
+
+  pass "Codex claim creation failures are distinct from lock contention"
+}
+
 test_harness_detection_failure_is_not_reported_as_live_lock_holder() {
   local rec root home fakebin out
   rec=$(new_world harness-detection-failure)
@@ -1098,6 +1118,7 @@ test_explicit_harness_owner_rejects_invalid_processes
 test_codex_owner_rejects_a_different_harness_pid
 test_explicit_owner_tracks_a_real_process_lifecycle
 test_codex_token_owns_and_releases_lock_without_process_visibility
+test_codex_claim_creation_failure_is_not_reported_as_contention
 test_harness_detection_failure_is_not_reported_as_live_lock_holder
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
