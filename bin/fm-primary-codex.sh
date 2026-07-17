@@ -19,9 +19,21 @@ cleanup() {
   "$SCRIPT_DIR/fm-lock.sh" release >/dev/null 2>&1 || true
 }
 
+codex_bin=${FM_CODEX_BIN:-}
+if [ -z "$codex_bin" ]; then
+  codex_bin=$(command -v codex 2>/dev/null || true)
+fi
+if [ -z "$codex_bin" ] && [ -x /Applications/ChatGPT.app/Contents/Resources/codex ]; then
+  codex_bin=/Applications/ChatGPT.app/Contents/Resources/codex
+fi
+if [ ! -x "$codex_bin" ]; then
+  echo "error: Codex executable not found; install ChatGPT or set FM_CODEX_BIN" >&2
+  exit 127
+fi
+
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-codex "$@"
+"$codex_bin" "$@"

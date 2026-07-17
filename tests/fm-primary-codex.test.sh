@@ -21,7 +21,7 @@ printf '%s\n' "$FM_HARNESS_OWNER_PID" > "$FM_HOME/pid-seen"
 SH
 chmod +x "$TMP/bin/codex"
 
-FM_TEST_ROOT="$ROOT" FM_HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+FM_TEST_ROOT="$ROOT" FM_HOME="$TMP/home" FM_CODEX_BIN="$TMP/bin/codex" PATH="/usr/bin:/bin" \
   "$ROOT/bin/fm-primary-codex.sh" >/dev/null
 
 [ -s "$TMP/home/token-seen" ] || fail "launcher did not pass a session token"
