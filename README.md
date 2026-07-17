@@ -104,11 +104,11 @@ pi
 **Codex**
 
 ```sh
-FM_HARNESS_OWNER_PID=$$ exec codex
+bin/fm-primary-codex.sh
 ```
 
 Codex can execute tools outside the interactive process's ancestry.
-The explicit owner PID lets firstmate keep the fleet lock tied to the live Codex session; `exec` preserves that PID until Codex exits.
+The launcher gives that session a private fleet-lock identity and releases its lock when Codex exits.
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.

@@ -6,17 +6,18 @@
 # Usage: fm-lock.sh           acquire; exit 2 if another live session holds it,
 #                            or exit 1 for another acquisition failure
 #        fm-lock.sh status    print holder and liveness; always exits 0
-# FM_HARNESS_OWNER_PID may name an explicit long-lived harness process when
-# the harness runs tools outside its process ancestry. The process must be
-# alive and its command must still identify a verified harness. For Codex,
-# launch with `FM_HARNESS_OWNER_PID=$$ exec codex` so exec preserves the PID.
+# Sandboxed Codex sessions use FM_CODEX_SESSION_TOKEN plus the long-lived
+# launcher PID in FM_HARNESS_OWNER_PID. bin/fm-primary-codex.sh owns both.
 set -u
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
+TOKEN_LOCK="$STATE/.lock-token"
+TOKEN_CLAIM="$STATE/.lock-claim"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
@@ -66,11 +67,61 @@ harness_pid() {
   return 1
 }
 
+valid_codex_token() {
+  case "${FM_CODEX_SESSION_TOKEN:-}" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#FM_CODEX_SESSION_TOKEN}" -eq 32 ]
+}
+
+if [ "${1:-}" = release ]; then
+  valid_codex_token || { echo "error: release requires a valid Codex session token" >&2; exit 1; }
+  [ -f "$TOKEN_LOCK" ] && [ "$(cat "$TOKEN_LOCK")" = "$FM_CODEX_SESSION_TOKEN" ] \
+    || { echo "error: Codex session token does not own the fleet lock" >&2; exit 1; }
+  [ -f "$LOCK" ] && [ "$(cat "$LOCK")" = "${FM_HARNESS_OWNER_PID:-}" ] \
+    || { echo "error: Codex launcher PID does not own the fleet lock" >&2; exit 1; }
+  rm -f "$LOCK" "$TOKEN_LOCK"
+  rmdir "$TOKEN_CLAIM" 2>/dev/null || true
+  echo "lock released: Codex launcher pid $FM_HARNESS_OWNER_PID"
+  exit 0
+fi
+
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK")
+  if [ -f "$TOKEN_LOCK" ] && [ -d "$TOKEN_CLAIM" ]; then
+    echo "lock: held by Codex launcher pid $old"
+    exit 0
+  fi
   if process_is_harness "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
+fi
+
+if [ -n "${FM_CODEX_SESSION_TOKEN:-}" ]; then
+  valid_codex_token || { echo "error: invalid Codex session token" >&2; exit 1; }
+  case "${FM_HARNESS_OWNER_PID:-}" in
+    ''|*[!0-9]*) echo "error: Codex launcher PID must be a process id" >&2; exit 1 ;;
+  esac
+  [ "$FM_HARNESS_OWNER_PID" -gt 1 ] \
+    || { echo "error: Codex launcher PID must be greater than one" >&2; exit 1; }
+  if ! mkdir "$TOKEN_CLAIM" 2>/dev/null; then
+    echo "error: another live firstmate session holds the lock; operate read-only until resolved" >&2
+    exit 2
+  fi
+  if ! printf '%s\n' "$FM_HARNESS_OWNER_PID" > "$LOCK" \
+    || ! printf '%s\n' "$FM_CODEX_SESSION_TOKEN" > "$TOKEN_LOCK"; then
+    rm -f "$LOCK" "$TOKEN_LOCK"
+    rmdir "$TOKEN_CLAIM" 2>/dev/null || true
+    echo "error: could not persist Codex fleet-lock ownership" >&2
+    exit 1
+  fi
+  echo "lock acquired: Codex launcher pid $FM_HARNESS_OWNER_PID"
+  exit 0
+fi
+
+if [ -f "$TOKEN_LOCK" ] || [ -d "$TOKEN_CLAIM" ]; then
+  echo "error: another live firstmate session holds the lock; operate read-only until resolved" >&2
+  exit 2
 fi
 
 if ! me=$(harness_pid); then

@@ -371,6 +371,50 @@ EOF
   pass "explicit ownership follows a real harness-named process lifecycle"
 }
 
+test_codex_token_owns_and_releases_lock_without_process_visibility() {
+  local rec root home fakebin token other_token out status
+  rec=$(new_world codex-token-owner)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  token=0123456789abcdef0123456789abcdef
+  other_token=fedcba9876543210fedcba9876543210
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 126
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(CODEX_SHELL=1 FM_CODEX_SESSION_TOKEN="$token" FM_HARNESS_OWNER_PID="$$" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START")
+  assert_contains "$out" "lock acquired: Codex launcher pid $$" "Codex token did not acquire without process visibility"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "Codex token session was not identified as Codex"
+  [ "$(cat "$home/state/.lock-token")" = "$token" ] || fail "fleet lock did not record the Codex token"
+  [ -d "$home/state/.lock-claim" ] || fail "fleet lock did not create its atomic claim"
+
+  status=0
+  out=$(FM_CODEX_SESSION_TOKEN="$other_token" FM_HARNESS_OWNER_PID="$$" \
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 2 "$status" "a second Codex token must be refused"
+  assert_contains "$out" "another live firstmate session holds the lock" "second Codex token did not report contention"
+
+  status=0
+  out=$(FM_CODEX_SESSION_TOKEN="$other_token" FM_HARNESS_OWNER_PID="$$" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" release 2>&1) || status=$?
+  expect_code 1 "$status" "a different Codex token must not release the lock"
+  [ -f "$home/state/.lock" ] || fail "a different Codex token removed the lock"
+
+  out=$(FM_CODEX_SESSION_TOKEN="$token" FM_HARNESS_OWNER_PID="$$" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" release)
+  assert_contains "$out" "lock released: Codex launcher pid $$" "owning Codex token did not release the lock"
+  assert_absent "$home/state/.lock" "Codex release left the PID lock behind"
+  assert_absent "$home/state/.lock-token" "Codex release left the token behind"
+  assert_absent "$home/state/.lock-claim" "Codex release left the claim behind"
+
+  pass "Codex token ownership works without process visibility and releases safely"
+}
+
 test_harness_detection_failure_is_not_reported_as_live_lock_holder() {
   local rec root home fakebin out
   rec=$(new_world harness-detection-failure)
@@ -1053,6 +1097,7 @@ test_explicit_codex_owner_acquires_lock_without_harness_ancestry
 test_explicit_harness_owner_rejects_invalid_processes
 test_codex_owner_rejects_a_different_harness_pid
 test_explicit_owner_tracks_a_real_process_lifecycle
+test_codex_token_owns_and_releases_lock_without_process_visibility
 test_harness_detection_failure_is_not_reported_as_live_lock_holder
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
