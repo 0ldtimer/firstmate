@@ -47,8 +47,28 @@ fm_write_meta "$HOME_DIR/state/task-one.meta" \
   "harness=codex" \
   "kind=ship" \
   "mode=ship"
+mkdir -p "$HOME_DIR/data/task-one/evidence"
+printf '# Task report\n' > "$HOME_DIR/data/task-one/report.md"
+printf 'png' > "$HOME_DIR/data/task-one/evidence/result.png"
+jq -n \
+  --arg report "$HOME_DIR/data/task-one/report.md" \
+  --arg reference "$HOME_DIR/data/task-one/evidence/result.png" '[
+  {id:"report",kind:"Report",status:"present",summary:"Completed the requested change",
+   detail:"No additional action required",source:"Crewmate",reference:$report},
+  {id:"visual-result",kind:"Screenshot",status:"present",
+   summary:"Changed surface",source:"Local browser",reference:$reference}
+]' > "$HOME_DIR/data/task-one/evidence.json"
 snapshot=$(printf '{"protocolVersion":"fm-bridge.v1","operation":"snapshot"}' | FM_HOME="$HOME_DIR" "$BRIDGE")
 revision=$(printf '%s' "$snapshot" | jq -r '.tasks[] | select(.id=="task-one") | .taskRevision')
+printf '%s' "$snapshot" | jq -e --arg reference "$HOME_DIR/data/task-one/evidence/result.png" '
+  .tasks[] | select(.id=="task-one") |
+  ([.evidence[] | select(.id=="report")] | length) == 1
+  and (.evidence[] | select(.id=="report") |
+    .summary == "Completed the requested change" and .detail == "No additional action required")
+  and (.evidence[] | select(.id=="visual-result") |
+    .kind == "Screenshot" and .status == "present" and .reference == $reference)
+' >/dev/null || fail "Bridge must project declared visual evidence"
+pass "Bridge projects report and visual evidence manifests"
 request=$(jq -n --arg revision "$revision" '{
   protocolVersion:"fm-bridge.v1",operation:"command",
   command:{

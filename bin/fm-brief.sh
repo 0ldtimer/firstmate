@@ -366,6 +366,12 @@ $RULE1
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+# Review evidence
+For user-facing or visual changes, capture a screenshot or recording of the actual changed surface whenever the application can be run safely. Automated tests and a written report do not substitute for visual verification.
+Before changing code, confirm the task defines what evidence will prove completion: the required automated checks, whether visual proof is required or explicitly not applicable, and any known verification limitations. If that definition is missing or ambiguous, append \`needs-decision: evidence contract is not agreed\` and stop before implementation.
+Write reviewable artifacts under \`$DATA/$ID/evidence/\` and describe them in \`$DATA/$ID/evidence.json\`. Include a \`Report\` item whose concise \`summary\` says what was completed and whose optional \`detail\` states anything the captain still needs to know; reserve the referenced report for full depth. Visual entries use \`kind\` \`Screenshot\` or \`Video\`. Every entry contains \`id\`, \`kind\`, \`status\`, \`summary\`, \`source\`, and absolute \`reference\`.
+If visual verification cannot be performed, state the exact limitation in the report and do not create or claim visual evidence. Never use mock data without labelling the capture as a controlled fixture.
+
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.

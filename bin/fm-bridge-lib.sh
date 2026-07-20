@@ -41,10 +41,31 @@ fm_bridge_capabilities() { # <state> <pr-url>
 }
 
 fm_bridge_evidence() { # <task-json> <revision>
-  local task=$1 revision=$2 report pr
+  local task=$1 revision=$2 id report pr manifest manifest_items='[]'
+  id=$(printf '%s' "$task" | jq -r '.id // empty')
   report=$(printf '%s' "$task" | jq -r '.paths.report.path // empty')
   pr=$(printf '%s' "$task" | jq -r '.pr.url // empty')
-  jq -n --arg report "$report" --arg pr "$pr" --arg revision "$revision" '
+  manifest="$DATA/$id/evidence.json"
+  if [ -f "$manifest" ]; then
+    manifest_items=$(jq -c '
+      if type != "array" then [] else [
+        .[] | select(type == "object") |
+        select((.id | type) == "string" and (.kind | type) == "string") |
+        {
+          id, kind,
+          status:(.status // "unknown"),
+          summary:(.summary // .kind),
+          detail:(.detail // null),
+          source:(.source // "FirstMate"),
+          capturedAt:(.capturedAt // null),
+          commit:(.commit // null),
+          reference:(.reference // null)
+        }
+      ] end
+    ' "$manifest" 2>/dev/null || printf '[]')
+  fi
+  jq -n --arg report "$report" --arg pr "$pr" --arg revision "$revision" \
+    --argjson manifest "$manifest_items" '
     [
       if $report != "" then {
         id:"report",kind:"Report",status:"present",summary:"Shipmate report is available",
@@ -54,7 +75,9 @@ fm_bridge_evidence() { # <task-json> <revision>
         id:"pull-request",kind:"Pull request",status:"present",summary:"Pull request is available",
         source:"GitHub",taskRevision:$revision,reference:$pr
       } else empty end
-    ]
+    ] as $defaults |
+    reduce ($manifest[] | . + {taskRevision:$revision}) as $item
+      ($defaults; map(select(.id != $item.id)) + [$item])
   '
 }
 
