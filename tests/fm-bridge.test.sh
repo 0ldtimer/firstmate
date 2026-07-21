@@ -48,6 +48,14 @@ fm_write_meta "$HOME_DIR/state/task-one.meta" \
   "kind=ship" \
   "mode=ship"
 mkdir -p "$HOME_DIR/data/task-one/evidence"
+cat > "$HOME_DIR/data/task-one/brief.md" <<'EOF'
+You are a crewmate.
+
+# Task
+## Keep the original mission visible during review
+
+Do the requested work.
+EOF
 printf '# Task report\n' > "$HOME_DIR/data/task-one/report.md"
 printf 'png' > "$HOME_DIR/data/task-one/evidence/result.png"
 jq -n \
@@ -59,16 +67,49 @@ jq -n \
    summary:"Changed surface",source:"Local browser",reference:$reference}
 ]' > "$HOME_DIR/data/task-one/evidence.json"
 snapshot=$(printf '{"protocolVersion":"fm-bridge.v1","operation":"snapshot"}' | FM_HOME="$HOME_DIR" "$BRIDGE")
+same_snapshot=$(printf '{"protocolVersion":"fm-bridge.v1","operation":"snapshot"}' | FM_HOME="$HOME_DIR" "$BRIDGE")
+same_revision=$(printf '%s' "$same_snapshot" | jq -r '.snapshotRevision')
 revision=$(printf '%s' "$snapshot" | jq -r '.tasks[] | select(.id=="task-one") | .taskRevision')
+test "$(printf '%s' "$snapshot" | jq -r '.snapshotRevision')" = "$same_revision" ||
+  fail "unchanged projected fleet must retain a stable snapshot revision"
 printf '%s' "$snapshot" | jq -e --arg reference "$HOME_DIR/data/task-one/evidence/result.png" '
   .tasks[] | select(.id=="task-one") |
-  ([.evidence[] | select(.id=="report")] | length) == 1
+  .summary == "Keep the original mission visible during review"
+  and ([.evidence[] | select(.id=="report")] | length) == 1
   and (.evidence[] | select(.id=="report") |
     .summary == "Completed the requested change" and .detail == "No additional action required")
   and (.evidence[] | select(.id=="visual-result") |
     .kind == "Screenshot" and .status == "present" and .reference == $reference)
 ' >/dev/null || fail "Bridge must project declared visual evidence"
 pass "Bridge projects report and visual evidence manifests"
+pass "Bridge snapshot revision ignores heartbeat-only timestamps"
+send_stub="$TMP_ROOT/fm-send-stub"
+send_log="$TMP_ROOT/fm-send.log"
+cat > "$send_stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FM_TEST_SEND_LOG"
+EOF
+chmod +x "$send_stub"
+feedback_request=$(jq -n --arg revision "$revision" '{
+  protocolVersion:"fm-bridge.v1",operation:"command",
+  command:{protocolVersion:"fm-bridge.v1",commandId:"feedback-1",action:"feedback",
+    taskId:"task-one",expectedRevision:$revision,feedback:"Tighten the empty state copy"}
+}')
+feedback_result=$(printf '%s' "$feedback_request" | FM_HOME="$HOME_DIR" \
+  FM_BRIDGE_SEND_BIN="$send_stub" FM_TEST_SEND_LOG="$send_log" "$BRIDGE")
+printf '%s' "$feedback_result" | jq -e '
+  .accepted == true and .message == "Feedback recorded and automatically redispatched to task-one"
+  and (.snapshot.tasks[] | select(.id=="task-one") | .state == "feedbackProvided")
+  and (.snapshot.tasks[] | select(.id=="task-one") | .summary == "Keep the original mission visible during review")
+' >/dev/null || fail "feedback did not project the redispatch lifecycle"
+jq -e '.status == "redispatched" and .scope == "original" and .feedback == "Tighten the empty state copy"' \
+  "$HOME_DIR/data/task-one/feedback/feedback-1.json" >/dev/null || fail "feedback record was not durable"
+assert_contains "$(cat "$send_log")" "Resume this same task within its original scope" \
+  "redispatch did not preserve the original mission boundary"
+pass "Bridge feedback is durable, visible, and automatically redispatched in scope"
+
+# Feedback changes the task revision; subsequent command tests use the new one.
+revision=$(printf '%s' "$feedback_result" | jq -r '.snapshot.tasks[] | select(.id=="task-one") | .taskRevision')
 request=$(jq -n --arg revision "$revision" '{
   protocolVersion:"fm-bridge.v1",operation:"command",
   command:{

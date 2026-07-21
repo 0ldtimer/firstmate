@@ -107,6 +107,24 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+write_draft_evidence_contract() {
+  local contract="$DATA/$ID/evidence-contract.json"
+  [ -e "$contract" ] && return
+  cat > "$contract" <<'EOF'
+{
+  "schemaVersion": 1,
+  "status": "draft",
+  "acceptance": [],
+  "automatedChecks": [],
+  "visualEvidence": {
+    "requirement": "undecided",
+    "targets": []
+  },
+  "limitations": []
+}
+EOF
+}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -265,6 +283,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
+write_draft_evidence_contract
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
@@ -381,4 +400,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+write_draft_evidence_contract
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

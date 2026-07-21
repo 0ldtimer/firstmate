@@ -24,6 +24,7 @@ fm_bridge_state() { # <snapshot state>
     blocked|failed) printf 'blocked' ;;
     validating|reviewing|ci|checks-running) printf 'verifying' ;;
     pr-ready|ready) printf 'prReady' ;;
+    feedback-provided) printf 'feedbackProvided' ;;
     working|running|fixing) printf 'working' ;;
     paused|idle) printf 'paused' ;;
     approved|signed-off) printf 'approved' ;;
@@ -38,6 +39,22 @@ fm_bridge_capabilities() { # <state> <pr-url>
     ["feedback","defer"]
     + (if ($state == "awaitingCaptain" or $state == "prReady") then ["sign-off"] else [] end)
   '
+}
+
+# Return the stable task heading from the original dispatch brief. Current
+# status details (including captain feedback) describe lifecycle state and must
+# never replace the mission itself on review surfaces.
+fm_bridge_brief_summary() { # <task-id>
+  local brief="$DATA/$1/brief.md"
+  [ -f "$brief" ] || return 0
+  awk '
+    /^# Task[[:space:]]*$/ { in_task=1; next }
+    in_task && /^##[[:space:]]+/ {
+      sub(/^##[[:space:]]+/, "")
+      print
+      exit
+    }
+  ' "$brief"
 }
 
 fm_bridge_evidence() { # <task-json> <revision>
@@ -110,7 +127,7 @@ fm_bridge_snapshot() {
 }
 
 fm_bridge_project_snapshot() {
-  local base tasks='[]' task source revision state evidence evidence_revision capabilities projected
+  local base tasks='[]' task source revision state evidence evidence_revision capabilities projected stable_revision brief_summary
   base=$(fm_bridge_snapshot) || return
   while IFS= read -r task; do
     source=$(printf '%s' "$task" | jq -c '.source | {
@@ -130,11 +147,14 @@ fm_bridge_project_snapshot() {
     evidence=$(fm_bridge_evidence "$(printf '%s' "$task" | jq -c '.source')" "$revision" | jq -c .)
     evidence_revision=$(printf '%s' "$evidence" | jq -cS . | fm_bridge_digest)
     capabilities=$(fm_bridge_capabilities "$state" "$(printf '%s' "$task" | jq -r '.pr')" | jq -c .)
+    brief_summary=$(fm_bridge_brief_summary "$(printf '%s' "$task" | jq -r '.id')")
     projected=$(printf '%s' "$task" | jq -c \
       --arg revision "$revision" --arg state "$state" \
+      --arg brief_summary "$brief_summary" \
       --arg evidence_revision "$evidence_revision" \
       --argjson evidence "$evidence" --argjson capabilities "$capabilities" '
       del(.rawState,.pr,.source) + {
+        summary:(if (.summary // "") != "" then .summary elif $brief_summary != "" then $brief_summary else null end),
         state:$state,
         taskRevision:$revision,
         capabilities:$capabilities,
@@ -143,5 +163,6 @@ fm_bridge_project_snapshot() {
       }')
     tasks=$(jq -c --argjson tasks "$tasks" --argjson task "$projected" '$tasks + [$task]' <<< '{}')
   done < <(printf '%s' "$base" | jq -c '.tasks[]')
-  printf '%s' "$base" | jq -c --argjson tasks "$tasks" '.tasks=$tasks'
+  stable_revision=$(printf '%s' "$tasks" | jq -cS 'map(del(.updatedAt))' | fm_bridge_digest)
+  printf '%s' "$base" | jq -c --argjson tasks "$tasks" --arg revision "$stable_revision" '.tasks=$tasks | .snapshotRevision=$revision'
 }

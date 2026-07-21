@@ -308,6 +308,20 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_generated_crewmates_start_with_a_draft_evidence_contract() {
+  local home contract
+  home="$TMP_ROOT/evidence-contract-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" evidence-ship firstmate >/dev/null 2>&1
+  contract="$home/data/evidence-ship/evidence-contract.json"
+  jq -e '.schemaVersion == 1 and .status == "draft" and .visualEvidence.requirement == "undecided"' "$contract" >/dev/null \
+    || fail "ship brief did not scaffold a draft evidence contract"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" evidence-scout firstmate --scout >/dev/null 2>&1
+  jq -e '.status == "draft"' "$home/data/evidence-scout/evidence-contract.json" >/dev/null \
+    || fail "scout brief did not scaffold a draft evidence contract"
+  pass "fm-brief.sh: standard crewmate briefs scaffold an evidence agreement"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -321,3 +335,4 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_generated_crewmates_start_with_a_draft_evidence_contract

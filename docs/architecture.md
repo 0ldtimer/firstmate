@@ -96,6 +96,14 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+### Evidence agreement at dispatch
+
+The standard `fm-brief.sh` path creates `data/<task>/evidence-contract.json` beside every ship or scout brief. It begins in `draft`: firstmate and the captain must agree the acceptance statements, automated checks, visual-evidence requirement and targets, and known limitations, then set `status` to `agreed`. `fm-spawn.sh` validates that structure and refuses to launch a generated crewmate brief until the agreement is complete. Visual evidence may be `required`, `optional`, or `not-applicable`; a required visual must name at least one target. This makes the definition of evidence an intake decision rather than something improvised after implementation. Legacy hand-authored briefs without the generated `# Review evidence` marker remain compatible and do not receive this gate.
+
+### Captain feedback redispatch
+
+Bridge feedback is recorded under `data/<task>/feedback/<command-id>.json` before delivery and the task emits a `feedback-provided` lifecycle event. FirstMate then uses the task’s existing, backend-verified send endpoint to redispatch the same crewmate automatically. The redispatch message confines execution to the original mission scope and agreed evidence contract; a crewmate that judges the direction to expand scope, authority, or evidence expectations must emit `needs-decision` and stop. On successful delivery the durable feedback record becomes `redispatched`; delivery failure is recorded rather than reported as success.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

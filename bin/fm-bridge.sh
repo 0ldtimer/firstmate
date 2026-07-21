@@ -12,6 +12,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+SEND_BIN="${FM_BRIDGE_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 
 # shellcheck source=bin/fm-bridge-lib.sh
 # shellcheck disable=SC1091
@@ -117,10 +118,25 @@ case "$operation" in
           fm_bridge_fail malformed_command "Feedback text is required"
           exit 2
         }
-        FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$task_id" "$feedback" >/dev/null || {
+        feedback_dir="$DATA/$task_id/feedback"
+        feedback_record="$feedback_dir/$command_id.json"
+        mkdir -p "$feedback_dir"
+        jq -n --arg commandId "$command_id" --arg feedback "$feedback" \
+          --arg scope "original" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '{commandId:$commandId,feedback:$feedback,scope:$scope,status:"recorded",recordedAt:$at}' \
+          > "$feedback_record"
+        feedback_summary=$(printf '%s' "$feedback" | tr '\n' ' ' | cut -c1-160)
+        printf 'feedback-provided: %s\n' "$feedback_summary" >> "$STATE/$task_id.status"
+        redispatch="Captain feedback for the existing mission: $feedback
+
+Resume this same task within its original scope and agreed evidence contract. Append working: when you resume. If this direction expands scope, authority, or evidence expectations, append needs-decision: feedback changes the mission contract and stop instead of implementing it."
+        FM_HOME="$FM_HOME" "$SEND_BIN" "$task_id" "$redispatch" >/dev/null || {
+          jq '.status="delivery-failed"' "$feedback_record" > "$feedback_record.tmp" && mv "$feedback_record.tmp" "$feedback_record"
           fm_bridge_fail endpoint_unavailable "Feedback could not be delivered to the shipmate"
           exit 2
         }
+        jq --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.status="redispatched" | .redispatchedAt=$at' "$feedback_record" > "$feedback_record.tmp"
+        mv "$feedback_record.tmp" "$feedback_record"
         ;;
       sign-off|defer)
         review_dir="$FM_HOME/data/$task_id"
@@ -135,8 +151,14 @@ case "$operation" in
         mv "$review_tmp" "$review_record"
         ;;
     esac
-    outcome=$(jq -n --arg action "$action" --arg task_id "$task_id" \
-      '{accepted:true,message:("FirstMate accepted " + $action + " for " + $task_id)}')
+    next_snapshot=$(fm_bridge_project_snapshot) || exit 1
+    if [ "$action" = feedback ]; then
+      message="Feedback recorded and automatically redispatched to $task_id"
+    else
+      message="FirstMate accepted $action for $task_id"
+    fi
+    outcome=$(jq -n --arg message "$message" --argjson snapshot "$next_snapshot" \
+      '{accepted:true,message:$message,snapshot:$snapshot}')
     tmp="$record.$$"
     jq -n --arg requestDigest "$digest" --argjson outcome "$outcome" \
       '{requestDigest:$requestDigest,outcome:$outcome}' > "$tmp"
