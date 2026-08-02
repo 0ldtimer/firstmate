@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Print the tail of a crewmate endpoint (bounded, for cheap diagnosis).
 # Usage: fm-peek.sh <target> [lines=40]
+#        fm-peek.sh --json <exact-task-id> [lines=40]
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit backend target.
+#   --json accepts only an exact task id with one metadata record and returns a
+#   closed descriptor plus bounded redacted capture. It never resolves a bare
+#   or ambiguous live target and never exposes commands or environment values.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,6 +16,150 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+
+machine_error() {  # <code> <message>
+  jq -n --arg code "$1" --arg message "$2" \
+    '{available:false,schemaVersion:"fm-session-inspection.v1",error:{code:$code,message:$message}}'
+}
+
+valid_task_id() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#1}" -le 128 ]
+}
+
+valid_target_id() {
+  [ -n "$1" ] && [ "${#1}" -le 512 ] || return 1
+  ! printf '%s' "$1" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+# redact_capture: credential redaction over one bounded pane capture on stdin.
+# A pane inserts a real newline at its width, so a credential wider than the
+# pane arrives split across capture lines and per-line rules would only match
+# the fragment on one of them. Rows the pane may have wrapped are therefore
+# stitched into one logical line before the single-line rules run, so a value -
+# or the introducer itself - split across the wrap is matched whole, and a
+# multi-row value stays a single token the value rules consume entirely.
+# A pane that wrapped on the space separating an introducer from its value
+# leaves no split token to stitch, and the space itself lands either at the end
+# of one row (where the pane strips it) or at the start of the next. Both shapes
+# leave a bare introducer at a row end: a stitched row gets the separating space
+# back, and an unstitched one fails closed onto the next row's first token
+# regardless of the whitespace in front of it.
+# Stitching never trusts a measured display width. A mid-token wrap leaves the
+# row exactly as wide as the pane, so a row counts as possibly pane-wide when
+# its codepoints plus its non-ASCII codepoints - each of which may occupy two
+# columns - reach the widest row's guaranteed width, itself a lower bound on the
+# pane width because each non-ASCII codepoint may instead occupy none. Both
+# bounds err toward stitching, so a wide glyph cannot hide the wrap. Stitched
+# rows are split apart again unless the rules actually redacted something, so an
+# unrelated row that merely fills the pane keeps its own line and its own event.
+redact_capture() {
+  LC_ALL=C awk '
+    function codepoints(text,   rest) { rest = text; return length(text) - gsub(/[\200-\277]/, "", rest) }
+    function multibyte(text,    rest) { rest = text; return gsub(/[\300-\377]/, "", rest) }
+    {
+      line[NR] = $0
+      cells = codepoints($0)
+      wide = multibyte($0)
+      reach[NR] = cells + wide
+      if (cells - wide > floor) floor = cells - wide
+    }
+    END {
+      logical = ""; spans = ""; open = 0
+      for (i = 1; i <= NR; i++) {
+        row = line[i]
+        if (!open) { carried = pending; pending = 0; open = 1 }
+        dangling = (row ~ /(Bearer|gh[pousr]_|[A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*=)$/)
+        stitch = (i < NR && floor > 0 && reach[i] >= floor)
+        if (stitch && dangling) row = row " "
+        logical = logical row
+        spans = spans (spans == "" ? "" : ",") length(row)
+        if (stitch) continue
+        # A dangling introducer from the previous logical line claims the first
+        # token of this one, which is the wrapped value in full.
+        if (carried) {
+          indent = ""
+          if (match(logical, /^[ \t]+/)) { indent = substr(logical, 1, RLENGTH); logical = substr(logical, RLENGTH + 1) }
+          sub(/^[^ \t]+/, "[REDACTED]", logical)
+          logical = indent logical
+        }
+        print spans "\t" logical
+        logical = ""; spans = ""; open = 0
+        pending = dangling
+      }
+    }
+  ' | LC_ALL=C sed -E \
+    -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/g' \
+    -e 's/(gh[pousr]_)[A-Za-z0-9_]+/\1[REDACTED]/g' \
+    -e 's/([A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*)=[^[:space:]]+/\1=[REDACTED]/g' \
+    -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
+  | LC_ALL=C awk '
+    # The leading span list records each stitched row width; the rules cannot
+    # match inside it, so a logical line the rules left byte-for-byte alone is
+    # handed back as the rows the pane actually printed.
+    {
+      cut = index($0, "\t")
+      count = split(substr($0, 1, cut - 1), span, ",")
+      text = substr($0, cut + 1)
+      total = 0
+      for (i = 1; i <= count; i++) total += span[i]
+      if (length(text) != total || index(text, "[REDACTED]") > 0) { print text; next }
+      at = 1
+      for (i = 1; i <= count; i++) { print substr(text, at, span[i]); at += span[i] }
+    }
+  '
+}
+
+machine_peek() {  # <task-id> <lines>
+  # A wrapped credential's introducer can sit just above the requested window,
+  # so the capture reads a bounded number of extra rows for redaction context
+  # and the answer is trimmed back to the requested bound afterwards.
+  local task_id=$1 lines=$2 lookback=8 meta backend target expected capture bytes truncated=false lifecycle=running
+  command -v jq >/dev/null 2>&1 || { echo "fm-peek: jq not found" >&2; return 1; }
+  valid_task_id "$task_id" || { machine_error malformed_task "Task identity is invalid"; return 2; }
+  case "$lines" in ''|*[!0-9]*|0) machine_error invalid_bound "Capture lines must be a positive integer"; return 2 ;; esac
+  [ "$lines" -le 200 ] || { machine_error invalid_bound "Capture lines are limited to 200"; return 2; }
+  meta="$STATE/$task_id.meta"
+  [ -f "$meta" ] || { machine_error session_not_found "No exact session descriptor exists for the task"; return 2; }
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  valid_target_id "$target" || { machine_error session_unavailable "The task has no valid backend target"; return 2; }
+  expected="fm-$task_id"
+  if ! fm_backend_target_exists "$backend" "$target" "$expected"; then
+    lifecycle=ended
+    machine_error session_ended "The recorded session endpoint is no longer available"
+    return 2
+  fi
+  capture=$(fm_backend_capture "$backend" "$target" "$((lines + lookback))" "$expected" 2>/dev/null) || {
+    machine_error session_unavailable "The recorded session could not be captured"
+    return 2
+  }
+  capture=$(printf '%s\n' "$capture" | redact_capture | tail -n "$lines")
+  bytes=$(printf '%s' "$capture" | LC_ALL=C wc -c | tr -d '[:space:]')
+  if [ "$bytes" -gt 32768 ]; then
+    capture=$(printf '%s' "$capture" | head -c 32768)
+    bytes=32768
+    truncated=true
+  fi
+  jq -n --arg taskId "$task_id" --arg backend "$backend" --arg targetId "$target" \
+    --arg lifecycle "$lifecycle" --arg text "$capture" --argjson lines "$lines" \
+    --argjson bytes "$bytes" --argjson truncated "$truncated" '
+    {
+      available:true,
+      schemaVersion:"fm-session-inspection.v1",
+      descriptor:{taskId:$taskId,backend:$backend,targetId:$targetId,lifecycle:$lifecycle},
+      capture:{text:$text,lines:$lines,bytes:$bytes,truncated:$truncated},
+      mode:"bounded-read-only",
+      authoritative:false
+    }
+  '
+}
+
+if [ "${1:-}" = --json ]; then
+  [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { machine_error malformed_request "Usage: fm-peek.sh --json <task-id> [lines]"; exit 2; }
+  machine_peek "$2" "${3:-40}"
+  exit $?
+fi
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 

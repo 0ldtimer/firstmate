@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "fm-captains-log-compatibility.v1",
+  "projectionVersion": "fm-captains-log-projection.v1",
+  "correlationVersion": "shapeup-correlation.v1",
+  "cases": [
+    { "name": "complete", "core": "available", "shapeUp": "available", "sessionInspection": "available" },
+    { "name": "core-only", "core": "available", "shapeUp": "unavailable", "sessionInspection": "unavailable" },
+    { "name": "shapeup-partial", "core": "available", "shapeUp": "partial", "sessionInspection": "unavailable" },
+    { "name": "unsupported", "core": "unavailable", "shapeUp": "unavailable", "sessionInspection": "unavailable" }
+  ]
+}

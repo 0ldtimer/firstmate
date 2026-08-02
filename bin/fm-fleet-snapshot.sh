@@ -51,6 +51,14 @@
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes with an unknown current classification are partial, not
 #     unreadable, and retain independently trustworthy structured surfaces.
+#   captains_log_projection: the embedded `fm-captains-log-snapshot.v1` document
+#     produced by bin/fm-captains-log-projection.sh, carrying missions, reports,
+#     evidence, conditions, buildReviews, outcomes, shapeUpOutcomes, and
+#     invalidRecords. freshness is "fresh" with a sourceRevision and capturedAt
+#     when the projection answered; a projection that is absent, failing, or
+#     rejecting the request degrades to freshness "unavailable" with null
+#     sourceRevision, null capturedAt, and empty collections rather than failing
+#     this read-only snapshot.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -1372,6 +1380,16 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+if ENGINEERING_PROJECTION_RESPONSE=$(printf '%s' \
+  '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' \
+  | FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    FM_PROJECTION_NOW="$SNAPSHOT_NOW" "$SCRIPT_DIR/fm-captains-log-projection.sh" 2>/dev/null) \
+  && printf '%s' "$ENGINEERING_PROJECTION_RESPONSE" | jq -e '.accepted == true' >/dev/null 2>&1; then
+  ENGINEERING_PROJECTION_JSON=$(printf '%s' "$ENGINEERING_PROJECTION_RESPONSE" | jq -c '.snapshot')
+else
+  ENGINEERING_PROJECTION_JSON=$(jq -n \
+    '{schemaVersion:"fm-captains-log-snapshot.v1",freshness:"unavailable",sourceRevision:null,capturedAt:null,missions:[],reports:[],evidence:[],conditions:[],buildReviews:[],outcomes:[],shapeUpOutcomes:[],invalidRecords:[]}')
+fi
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
@@ -1387,6 +1405,7 @@ jq -n \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
+  --argjson captains_log_projection "$ENGINEERING_PROJECTION_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1401,6 +1420,7 @@ jq -n \
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
+     captains_log_projection:$captains_log_projection,
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }

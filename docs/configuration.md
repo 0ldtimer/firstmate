@@ -10,7 +10,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and the Engineering mission, report, and outcome records under `data/engineering/` published by the [Captain's Log machine projection](captains-log-machine-projection.md).
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
@@ -150,6 +150,11 @@ The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative po
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal `/stow` skill curates only the editable local files in that case and reports the primary-owned shared file as a concrete exception if it alone exceeds the budget.
 The helper's header owns exact parsing, publication, and report output mechanics.
+
+## ShapeUp Engineering client (config/shapeup-client.json)
+
+The optional local, gitignored `config/shapeup-client.json` enables supervisor-owned ShapeUp submission for accepted Engineering reports; without it, reports stay durable in this home and nothing is submitted.
+[`shapeup-client.md`](shapeup-client.md) owns its schema, protected credential file, transport contract, and typed failure outcomes.
 
 ## Secondmate routes (data/secondmates.md)
 

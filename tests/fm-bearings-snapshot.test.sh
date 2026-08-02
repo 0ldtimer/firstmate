@@ -1690,8 +1690,9 @@ EOF
         and (.reason | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
 
-  sed '/unreadable-child/a\
-- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
+  # Append with awk, not `sed a\`: BSD sed emits appended text without a trailing
+  # newline, which silently joins the fixture's next line and corrupts the backlog.
+  awk '{print} /unreadable-child/{print "- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)"}' \
     "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
@@ -1729,8 +1730,7 @@ EOF
       and .landed == []
       and .endpoints == []
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
-  sed '/## In flight/a\
-- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
+  awk '{print} /## In flight/{print "- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)"}' \
     "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
