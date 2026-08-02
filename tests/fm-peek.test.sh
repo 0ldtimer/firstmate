@@ -205,6 +205,52 @@ for secret in "$ASSIGN_VALUE" "$COLON_VALUE" "$GH_WRAP_VALUE" "$PASSWD_VALUE" "$
 done
 pass "a credential wrapped straight after its assignment separator is redacted, not released"
 
+# A colon is also ordinary prose punctuation. Inert telemetry that merely mentions
+# a credential word must keep its own line and its own value: a pane-wide inert
+# label must not be read as a dangling introducer that stitches away the next
+# row's event, and a short prose operand must not be mistaken for a secret.
+INERT_CAPTURE="$TMP_ROOT/inert-colon-capture.txt"
+: > "$INERT_CAPTURE"
+pane_row "$INERT_CAPTURE" 40 'ok 12 usage summary for this run tokens:'
+pane_row "$INERT_CAPTURE" 38 'ok 13 unrelated assertion on next line'
+pane_row "$INERT_CAPTURE" 30 'Total tokens: 4821 in this run'
+pane_row "$INERT_CAPTURE" 37 'Retrieved access-key: none configured'
+pane_row "$INERT_CAPTURE" 36 'Password: not required for this step'
+inert=$(peek_capture "$INERT_CAPTURE" 20)
+printf '%s' "$inert" | jq -e '
+  .available == true
+  and .capture.text == "ok 12 usage summary for this run tokens:\nok 13 unrelated assertion on next line\nTotal tokens: 4821 in this run\nRetrieved access-key: none configured\nPassword: not required for this step"
+' >/dev/null || fail "inert colon-separated telemetry must render unchanged and keep its row boundaries: $inert"
+pass "inert telemetry naming a credential word keeps its own line and its own value"
+
+# The colon form still has to catch a genuine credential header, including one
+# whose label carries a vendor prefix or suffix around the credential word.
+COLON_CAPTURE="$TMP_ROOT/colon-capture.txt"
+: > "$COLON_CAPTURE"
+HEADER_VALUE='fm_fake_12Cheader'
+PREFIXED_VALUE='fm_fake_13Cpref'
+SUFFIXED_VALUE='fm_fake_14Csuffi'
+BARE_VALUE='fm_fake_15Cbarepwd'
+# Widths ascend so only the last row can be pane-wide: every header here fits on
+# one row, and this case is about the rules rather than the wrap.
+pane_row "$COLON_CAPTURE" 28 "X-Api-Key: $HEADER_VALUE"
+pane_row "$COLON_CAPTURE" 28 "Password: $BARE_VALUE"
+pane_row "$COLON_CAPTURE" 37 "  aws_access_key_id: $SUFFIXED_VALUE"
+pane_row "$COLON_CAPTURE" 38 "AWS_SECRET_ACCESS_KEY: $PREFIXED_VALUE"
+colon=$(peek_capture "$COLON_CAPTURE" 20)
+colon_inspection=$(inspect_capture "$COLON_CAPTURE" 20)
+printf '%s' "$colon" | jq -e '
+  (.capture.text | contains("X-Api-Key: [REDACTED]"))
+  and (.capture.text | contains("AWS_SECRET_ACCESS_KEY: [REDACTED]"))
+  and (.capture.text | contains("aws_access_key_id: [REDACTED]"))
+  and (.capture.text | contains("Password: [REDACTED]"))
+' >/dev/null || fail "genuine colon-separated credential headers must stay redacted: $colon"
+for secret in "$HEADER_VALUE" "$PREFIXED_VALUE" "$SUFFIXED_VALUE" "$BARE_VALUE"; do
+  refute_fragments "machine peek" "$colon" "$secret"
+  refute_fragments "session inspection" "$colon_inspection" "$secret"
+done
+pass "colon-separated credential headers are redacted whatever surrounds the credential word"
+
 # A two-column glyph makes a row occupy the whole pane while counting fewer
 # codepoints than a plain row beside it, so the wrap must not be recognized by
 # a measured width that a wide glyph can hide.

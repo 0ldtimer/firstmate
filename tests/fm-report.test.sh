@@ -220,3 +220,66 @@ else
   ' >/dev/null || fail "a retry once the history is readable must resume with an uncolliding sequence: $retried"
   pass "a condition history that cannot be read in full is typed, never silently truncated"
 fi
+
+# Acceptance order is FirstMate's, so concurrent appends into one home must never
+# be handed the same sequence: the tie would fall through to the crewmate-supplied
+# reportId and hand ordering back to the crewmate.
+CONCURRENT_HOME="$TMP_ROOT/concurrent-home"
+CONCURRENT_WORKTREE="$CONCURRENT_HOME/projects/task-50"
+mkdir -p "$CONCURRENT_HOME/data" "$CONCURRENT_HOME/state" "$CONCURRENT_HOME/config" "$CONCURRENT_WORKTREE"
+jq -n --arg root "$CONCURRENT_WORKTREE" '{
+  schemaVersion:"fm-engineering-mission.v1",missionId:"mission-50",taskId:"task-50",crewmateId:"travis",
+  acceptedBuildRevision:"build-11:r1",evidenceRequirements:[],allowedEvidenceRoots:[$root],
+  correlation:{schemaVersion:"shapeup-correlation.v1",sourceRevision:"dispatch:r11",capturedAt:"2026-08-01T14:00:00Z",
+    identity:{kind:"command",id:"dispatch-50"},shapeUp:{cycleRef:"cycle-16",buildRef:"build-11",buildRevision:"build-11:r1",scopeRef:null},
+    firstMate:{missionId:"mission-50",taskId:"task-50",crewmateId:"travis",session:null}}
+}' | FM_HOME="$CONCURRENT_HOME" "$MISSION" accept - >/dev/null
+
+concurrent_report() {  # <report-id>
+  jq -n --arg id "$1" '{
+    schemaVersion:"fm-engineering-report.v1",reportId:$id,kind:"hill_judgment",capturedAt:"2026-08-01T14:01:00Z",
+    missionId:"mission-50",taskId:"task-50",crewmateId:"travis",
+    hill:{phase:"uphill",judgment:"Concurrent crewmates report into one home.",movement:"unchanged"},
+    correlation:{schemaVersion:"shapeup-correlation.v1",sourceRevision:("event:"+$id),capturedAt:"2026-08-01T14:01:00Z",
+      identity:{kind:"event",id:$id},shapeUp:{cycleRef:"cycle-16",buildRef:"build-11",buildRevision:"build-11:r1",scopeRef:null},
+      firstMate:{missionId:"mission-50",taskId:"task-50",crewmateId:"travis",session:null}}
+  }'
+}
+
+for index in 1 2 3 4 5 6; do
+  concurrent_report "report-concurrent-$index" > "$TMP_ROOT/concurrent-$index.json"
+done
+for index in 1 2 3 4 5 6; do
+  FM_HOME="$CONCURRENT_HOME" FM_ENGINEERING_NOW="2026-08-01T14:02:00Z" \
+    "$REPORT" append "$TMP_ROOT/concurrent-$index.json" >/dev/null 2>&1 &
+done
+wait
+sequences=$(jq -s -r '[.[] | select(.status == "accepted") | .acceptanceSequence] | sort | @csv' \
+  "$CONCURRENT_HOME"/data/engineering/reports/*.json)
+[ "$sequences" = "1,2,3,4,5,6" ] || fail "concurrent appends did not each get their own acceptance sequence: $sequences"
+pass "concurrent appends allocate distinct FirstMate acceptance sequences"
+
+# A store that cannot hand over every report must not yield a floor below the true
+# maximum, because that reuses a sequence two records then share.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "skip: unreadable-record sequence coverage needs a non-root user"
+else
+  rm -f "$CONCURRENT_HOME/data/engineering/reports.sequence"
+  chmod 000 "$CONCURRENT_HOME/data/engineering/reports/report-concurrent-1.json"
+  set +e
+  unreadable=$(concurrent_report report-concurrent-7 |
+    FM_HOME="$CONCURRENT_HOME" FM_ENGINEERING_NOW="2026-08-01T14:03:00Z" "$REPORT" append -)
+  status=$?
+  set -e
+  chmod 644 "$CONCURRENT_HOME/data/engineering/reports/report-concurrent-1.json"
+  [ "$status" -ne 0 ] || fail "a partially readable store must not silently rebuild the acceptance floor"
+  printf '%s' "$unreadable" | jq -e '.accepted == false and .error.code == "record_not_durable"' >/dev/null \
+    || fail "an unrebuildable acceptance floor must be typed: $unreadable"
+  assert_absent "$CONCURRENT_HOME/data/engineering/reports/report-concurrent-7.json" \
+    "a report whose acceptance order is unknown must not be stored"
+  recovered=$(concurrent_report report-concurrent-7 |
+    FM_HOME="$CONCURRENT_HOME" FM_ENGINEERING_NOW="2026-08-01T14:04:00Z" "$REPORT" append -)
+  printf '%s' "$recovered" | jq -e '.accepted == true and .report.acceptanceSequence == 7' >/dev/null \
+    || fail "a retry once the store is readable must resume above the true maximum: $recovered"
+  pass "an acceptance floor that cannot be rebuilt in full is typed, never an order that repeats"
+fi

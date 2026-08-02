@@ -89,13 +89,16 @@ transport_call() {  # <config-json> <credential> <request-json>
   local -a runner=()
   transport=$(printf '%s' "$config" | jq -r '.transport.path')
   [ -f "$transport" ] && [ -x "$transport" ] || return 3
-  if command -v timeout >/dev/null 2>&1; then
+  if [ "${FM_SHAPEUP_FORCE_TIMEOUT_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
     runner=(timeout "$TRANSPORT_TIMEOUT")
-  elif command -v gtimeout >/dev/null 2>&1; then
+  elif [ "${FM_SHAPEUP_FORCE_TIMEOUT_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
     runner=(gtimeout "$TRANSPORT_TIMEOUT")
   elif command -v perl >/dev/null 2>&1; then
+    # A failed exec must not fall through into the parent's wait path, and a
+    # transport killed by a signal must not report the success status of the
+    # partial output it already wrote.
     # shellcheck disable=SC2016  # Perl source, not shell: its sigils are literal.
-    runner=(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$TRANSPORT_TIMEOUT")
+    runner=(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 126 : ($? >> 8))' "$TRANSPORT_TIMEOUT")
   else
     return 8
   fi

@@ -101,6 +101,53 @@ test_credential_vocabulary_is_shared() {
   pass "fm_eng_credential_name_ere and fm_eng_credential_name_regex share one vocabulary"
 }
 
+test_credential_label_form_is_whole_token() {
+  local labels name
+  labels=$(fm_eng_credential_label_ere)
+  # The colon form has to accept a real credential label whatever vendor prefix or
+  # suffix surrounds the credential word.
+  for name in SERVICE_TOKEN X-Api-Key aws_access_key_id AWS_SECRET_ACCESS_KEY Password access-key api_key; do
+    printf '%s:x\n' "$name" | LC_ALL=C grep -Eq "^($labels):" \
+      || fail "the credential label vocabulary does not match $name: $labels"
+  done
+  # A credential word glued to a trailing run is an inert telemetry label, not a
+  # credential name, and must not become a colon-form introducer.
+  for name in tokens secrets passwords credentials keys tokenized; do
+    ! printf '%s:x\n' "$name" | LC_ALL=C grep -Eq "^($labels):" \
+      || fail "the credential label vocabulary matched the inert plural label $name"
+  done
+  pass "fm_eng_credential_label_ere matches whole credential labels, not inert plurals"
+}
+
+test_locks_are_liveness_safe() {
+  local dir="$TMP_ROOT/locks/alpha" other="$TMP_ROOT/locks/beta" status
+  fm_eng_lock_acquire "$dir" 5 "2026-08-02T00:00:00Z" || fail "a free lock must be acquirable"
+  [ -d "$dir" ] || fail "acquiring the lock did not create its directory"
+  grep -q "^pid=$$\$" "$dir/owner" || fail "the lock owner record does not identify this process"
+
+  set +e
+  ( fm_eng_lock_acquire "$dir" 5 "2026-08-02T00:00:00Z" )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a lock held by a live owner must not be re-acquirable"
+
+  fm_eng_lock_acquire "$other" 5 "2026-08-02T00:00:00Z" || fail "an unrelated lock must stay acquirable"
+  fm_eng_lock_release "$dir"
+  [ ! -d "$dir" ] || fail "releasing the lock did not remove its directory"
+  [ -d "$other" ] || fail "releasing one lock must not release another"
+  fm_eng_lock_release_all
+  [ ! -d "$other" ] || fail "releasing all locks left one behind"
+
+  # An owner that is provably gone is reclaimed at once rather than waiting out
+  # the age window, so a crash cannot wedge the mutex.
+  mkdir -p "$dir"
+  printf 'host=%s\npid=%s\nstarted=%s\n' "${HOSTNAME:-$(hostname)}" 999999 "lstart:ThuJan100:00:001970" > "$dir/owner"
+  fm_eng_lock_acquire "$dir" 5 "2026-08-02T00:00:00Z" \
+    || fail "a lock whose owner is provably gone must be reclaimed"
+  fm_eng_lock_release_all
+  pass "fm_eng_lock_acquire serializes live owners and reclaims provably dead ones"
+}
+
 test_reads_are_bounded_and_closed() {
   local file="$TMP_ROOT/record.json" big value status
   printf '{"missionId":"mission-42"}\n' > "$file"
@@ -238,6 +285,8 @@ test_failures_are_typed_json() {
 test_identities_stay_privacy_safe
 test_credential_material_is_detected
 test_credential_vocabulary_is_shared
+test_credential_label_form_is_whole_token
+test_locks_are_liveness_safe
 test_reads_are_bounded_and_closed
 test_canonical_form_is_revision_stable
 test_writes_are_atomic_and_leave_no_residue

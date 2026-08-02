@@ -33,6 +33,7 @@ The `project` subcommand extends that same hold with a structured Captain Call p
 It requires an active hold and a packet file containing one condition, so projection cannot create a second attention store or completion owner.
 It keeps the human decision context first in the hold body and appends only the durable record identity and packet revision, never the private packet path.
 A hold that already carries a resolution record is mid-resolution, so `project` retains that record and reports `retained` instead of overwriting the retry identity an exact `resolve` retry needs to finish a partial routing operation.
+That `retained` line is the machine-readable outcome: `bin/fm-report.sh` records the withheld packet as a typed `retained` projection state rather than claiming the hold received a revision it never got.
 
 The `status --json` subcommand returns the condition identity, hold identity, packet revision, typed lifecycle, and durable held state without projecting its private packet path.
 The Captain's Log projection uses the existing `resolve` subcommand for supported `resolveCondition` intent and records resolved lifecycle only after the durable completion owner succeeds.
@@ -83,11 +84,12 @@ ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuin
 $ bash tests/fm-decision-hold.test.sh
 ok - Captain Call packets update independently and resolve through one durable completion owner
 ok - projecting a packet never erases a hold's in-flight resolution record
+ok - a packet withheld by an in-flight resolution is typed retained, not projected
 
 $ bash tests/fm-report.test.sh
 ok - a Captain Call packet that cannot be projected stays accepted, typed, and heals on exact replay
 ok - packet healing terminates once its durable Captain Call is closed
-(7 ok cases total; the two packet-projection lines are quoted, the rest elided)
+(9 ok cases total; the two packet-projection lines are quoted, the rest elided)
 
 $ bash tests/fm-captains-log-projection.test.sh
 ok - projection journals exact replay and rejects changed identity reuse
@@ -97,6 +99,7 @@ ok - the intent mutex recovers from crashes without ever reclaiming a live owner
 $ bash tests/fm-build-review.test.sh
 ok - Build Review binds the active mission/evidence revision and acceptance is not closeout
 ok - one Build Review packet spans every active mission and refuses conflicting revisions
+ok - an isolated active mission or report record makes Build Review fail closed with a typed refusal
 ok - a schema-invalid stored record stays visible and non-executable without blanking the projection
 ok - Review readiness follows FirstMate acceptance order, not crewmate capture time
 

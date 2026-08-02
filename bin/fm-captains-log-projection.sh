@@ -56,102 +56,12 @@ valid_identity() {  # <value>
   [ "${#1}" -le 128 ]
 }
 
-INTENT_LOCK_DIR=''
-INTENT_LOCK_HOST=${HOSTNAME:-$(hostname 2>/dev/null || printf 'unknown-host')}
-INTENT_LOCK_STALE_MINUTES=5
-case "${FM_PROJECTION_INTENT_LOCK_STALE_MINUTES:-}" in
-  ''|*[!0-9]*) ;;
-  *)
-    if [ "${#FM_PROJECTION_INTENT_LOCK_STALE_MINUTES}" -le 9 ] \
-      && [ "$FM_PROJECTION_INTENT_LOCK_STALE_MINUTES" -ge 1 ]; then
-      INTENT_LOCK_STALE_MINUTES=$FM_PROJECTION_INTENT_LOCK_STALE_MINUTES
-    fi
-    ;;
-esac
-
-remove_intent_lock() {  # <lock-dir>
-  rm -f "$1/owner" 2>/dev/null || true
-  rmdir "$1" 2>/dev/null || true
-}
-
-release_intent_lock() {
-  [ -n "$INTENT_LOCK_DIR" ] || return 0
-  remove_intent_lock "$INTENT_LOCK_DIR"
-  INTENT_LOCK_DIR=''
-}
-
-PROCESS_START_METHOD=lstart
-
-# The signature is rendered in a fixed locale and timezone so the same process
-# always yields the same identity whatever environment observes it. It carries
-# its method so a signature produced a different way is never mistaken for a
-# different process.
-process_start_signature() {  # <pid>
-  local value
-  value=$(LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -d '[:space:]')
-  [ -n "$value" ] || return 1
-  printf '%s:%s' "$PROCESS_START_METHOD" "$value"
-}
-
-# A lock whose recorded owner is provably gone - exited, or its pid recycled by a
-# process that started later - is reclaimed at once. An owner that cannot be
-# compared, including one recorded by another identity method, falls back to the
-# bounded age window, so no lock can wedge forever and none is reclaimed merely
-# because its identity is presented differently. A confirmed live owner is never
-# reclaimed, however long it runs and whoever owns it.
-intent_lock_owner_state() {  # <lock-dir>
-  local dir=$1 owner_host owner_pid owner_started current_started
-  if [ ! -f "$dir/owner" ]; then
-    printf 'unknown'
-    return 0
-  fi
-  owner_host=$(sed -n 's/^host=//p' "$dir/owner" 2>/dev/null | head -1)
-  owner_pid=$(sed -n 's/^pid=//p' "$dir/owner" 2>/dev/null | head -1)
-  owner_started=$(sed -n 's/^started=//p' "$dir/owner" 2>/dev/null | head -1)
-  if [ "$owner_host" != "$INTENT_LOCK_HOST" ]; then
-    printf 'unknown'
-    return 0
-  fi
-  case "$owner_pid" in
-    ''|*[!0-9]*) printf 'unknown'; return 0 ;;
-  esac
-  current_started=$(process_start_signature "$owner_pid") || current_started=''
-  if [ -z "$current_started" ]; then
-    if kill -0 "$owner_pid" 2>/dev/null; then
-      printf 'unknown'
-    else
-      printf 'dead'
-    fi
-    return 0
-  fi
-  case "$owner_started" in
-    "$PROCESS_START_METHOD":?*) ;;
-    *) printf 'unknown'; return 0 ;;
-  esac
-  if [ "$owner_started" = "$current_started" ]; then
-    printf 'alive'
-  else
-    printf 'dead'
-  fi
-}
-
-reclaim_stale_intent_lock() {  # <lock-dir>
-  local dir=$1
-  [ -d "$dir" ] || return 0
-  case "$(intent_lock_owner_state "$dir")" in
-    alive) return 0 ;;
-    dead) ;;
-    *)
-      [ -n "$(find "$dir" -maxdepth 0 -mmin "+$INTENT_LOCK_STALE_MINUTES" -print 2>/dev/null)" ] || return 0
-      ;;
-  esac
-  remove_intent_lock "$dir"
-}
-
-trap release_intent_lock EXIT
-trap 'release_intent_lock; exit 130' INT
-trap 'release_intent_lock; exit 143' TERM
-trap 'release_intent_lock; exit 129' HUP
+# The liveness-safe mutex is owned once by bin/fm-engineering-lib.sh so the
+# report and intent paths cannot drift into two different reclaim policies.
+trap fm_eng_lock_release_all EXIT
+trap 'fm_eng_lock_release_all; exit 130' INT
+trap 'fm_eng_lock_release_all; exit 143' TERM
+trap 'fm_eng_lock_release_all; exit 129' HUP
 
 # A record that parses but violates the shape this projection derives from it is
 # isolated exactly like an unparseable one. Otherwise a single hand-edited record
@@ -185,15 +95,19 @@ partition_records() {  # <records-json> <kind> <malformed-json> <record-id>...
       else
         optional(.outcome; "object")
       end;
+    def readable($value): if ($value | type) == "string" then $value else null end;
     [ range($records | length) as $index
       | {recordId:($ARGS.positional[$index] // ""), record:$records[$index]} ]
     | {
         records:[ .[] | select(.record | shaped) | .record ],
         invalid:($malformed + [ .[]
           | select(.record | shaped | not)
+          | (member(member(.record; "correlation"); "shapeUp")) as $shape
           | {
               kind:$kind,
               recordId:.recordId,
+              cycleRef:readable(member($shape; "cycleRef")),
+              buildRef:readable(member($shape; "buildRef")),
               error:{
                 code:"schema_invalid_record",
                 message:"Record does not match the projection record shape"
@@ -238,7 +152,13 @@ collect_records() {  # <dir> <kind>
     if [ "${#malformed[@]}" -gt 0 ]; then
       malformed_json=$(jq -cn --arg kind "$kind" '
         [ $ARGS.positional[]
-          | {kind:$kind,recordId:.,error:{code:"malformed_record",message:"Record is not a valid JSON object"}} ]
+          | {
+              kind:$kind,
+              recordId:.,
+              cycleRef:null,
+              buildRef:null,
+              error:{code:"malformed_record",message:"Record is not a valid JSON object"}
+            } ]
       ' --args "${malformed[@]}") || return 1
     fi
   fi
@@ -297,9 +217,17 @@ condition_projection() {  # <reports-json> <outcomes-json>
   '
 }
 
-build_reviews() {  # <missions-json> <reports-json> <outcomes-json>
-  local missions=$1 reports=$2 outcomes=$3
-  jq -cn --argjson missions "$missions" --argjson reports "$reports" --argjson outcomes "$outcomes" '
+# An isolated mission or report record cannot participate in readiness, so a
+# packet that might be missing one is never reported ready: the mission set would
+# silently shrink and the Captain could accept a Build Review that does not cover
+# every active mission. A record whose own correlation is unreadable could belong
+# to any Build, so it suppresses readiness across the Review set until the
+# operator repairs it. Isolation is part of the packet material, so newly
+# isolating a record invalidates a pending acceptance like any other change.
+build_reviews() {  # <missions-json> <reports-json> <outcomes-json> <invalid-json>
+  local missions=$1 reports=$2 outcomes=$3 invalid=$4
+  jq -cn --argjson missions "$missions" --argjson reports "$reports" --argjson outcomes "$outcomes" \
+    --argjson invalid "$invalid" '
     def authoritative: sort_by(.acceptedAt // "",.acceptanceSequence // 0,.reportId) | last // null;
     def terminal($missionId):
       ([ $reports[]
@@ -328,6 +256,12 @@ build_reviews() {  # <missions-json> <reports-json> <outcomes-json>
         | ($group[0].correlation.shapeUp) as $shape
         | ($group | map(.correlation.shapeUp.buildRevision // "") | unique) as $buildRevisions
         | (($buildRevisions | length) > 1) as $revisionConflict
+        | ([ $invalid[]
+            | select(.kind == "mission" or .kind == "report")
+            | select((.cycleRef == null or .buildRef == null)
+              or (.cycleRef == $shape.cycleRef and .buildRef == $shape.buildRef))
+            | {kind,recordId,error:.error.code}
+          ] | sort_by(.kind,.recordId)) as $isolatedRecords
         | ($group | map(. as $mission | {
             missionId:$mission.missionId,
             missionRevision:($mission.sourceRevision // ""),
@@ -348,13 +282,17 @@ build_reviews() {  # <missions-json> <reports-json> <outcomes-json>
             buildRevisions:$buildRevisions,
             revisionConflict:$revisionConflict,
             missionSet:$missionSet,
-            ready:(($revisionConflict | not) and ($missionSet | all(.terminal and .evidenceVerified))),
+            isolatedRecords:$isolatedRecords,
+            ready:(($revisionConflict | not)
+              and (($isolatedRecords | length) == 0)
+              and ($missionSet | all(.terminal and .evidenceVerified))),
             packetMaterial:({
               cycleRef:$shape.cycleRef,
               buildRef:$shape.buildRef,
               buildRevisions:$buildRevisions,
               revisionConflict:$revisionConflict,
-              missionSet:$missionSet
+              missionSet:$missionSet,
+              isolatedRecords:$isolatedRecords
             } | @json)
           }
       )
@@ -410,7 +348,7 @@ snapshot_json() {
     '{missions:$missions,reports:$reports,outcomes:$outcomes,shapeUpOutcomes:$shapeUpOutcomes,invalidRecords:$invalid}') || return 1
   source_revision=$(printf '%s' "$material" | digest) || return 1
   [ -n "$source_revision" ] || return 1
-  reviews=$(build_reviews "$missions" "$reports" "$outcomes") || return 1
+  reviews=$(build_reviews "$missions" "$reports" "$outcomes" "$invalid") || return 1
   [ -n "$reviews" ] || return 1
   reviews=$(review_revisions "$reviews") || return 1
   reviews=$(jq -cn --argjson reviews "$reviews" --argjson outcomes "$outcomes" '
@@ -486,7 +424,7 @@ replay_prior_outcome() {  # <record-path> <request-digest>
 
 intent_response() {  # <intent-json>
   local intent=$1 intent_id action digest_value record outcome tmp snapshot review build_ref packet_revision
-  local cycle_ref condition_id condition mission_id report_id decision decision_file route resolution_status lock_dir lock_started
+  local cycle_ref condition_id condition mission_id report_id decision decision_file route resolution_status lock_dir
   local -a route_args=()
   intent_id=$(printf '%s' "$intent" | jq -r '.intentId // empty')
   action=$(printf '%s' "$intent" | jq -r '.action // empty')
@@ -511,18 +449,11 @@ intent_response() {  # <intent-json>
     2) return 2 ;;
   esac
   lock_dir="$STATE/fm-projection-intent-locks/$intent_id"
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    reclaim_stale_intent_lock "$lock_dir"
-    if ! mkdir "$lock_dir" 2>/dev/null; then
-      fail_json intent_busy "The intent is already being processed"
-      return 2
-    fi
-  fi
-  INTENT_LOCK_DIR="$lock_dir"
-  lock_started=$(process_start_signature "$$") || lock_started=unknown
-  printf 'host=%s\npid=%s\nstarted=%s\nacquiredAt=%s\n' \
-    "$INTENT_LOCK_HOST" "$$" "$lock_started" "$NOW" > "$lock_dir/owner" 2>/dev/null || true
-  trap release_intent_lock RETURN
+  fm_eng_lock_acquire "$lock_dir" "${FM_PROJECTION_INTENT_LOCK_STALE_MINUTES:-}" "$NOW" || {
+    fail_json intent_busy "The intent is already being processed"
+    return 2
+  }
+  trap fm_eng_lock_release_all RETURN
   replay_prior_outcome "$record" "$digest_value"
   case $? in
     0) return 0 ;;
@@ -545,6 +476,10 @@ intent_response() {  # <intent-json>
     [ -n "$review" ] || { fail_json review_not_found "Build Review packet is unavailable"; return 2; }
     [ "$(printf '%s' "$review" | jq -r '.packetRevision')" = "$packet_revision" ] || {
       fail_json stale_packet "Build Review packet changed before Captain acceptance"
+      return 2
+    }
+    [ "$(printf '%s' "$review" | jq -r '.isolatedRecords | length')" = 0 ] || {
+      fail_json review_records_isolated "A stored mission or report record for this Build is invalid, so the packet cannot prove it covers every active mission"
       return 2
     }
     [ "$(printf '%s' "$review" | jq -r '.revisionConflict')" = false ] || {

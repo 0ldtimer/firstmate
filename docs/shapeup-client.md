@@ -46,6 +46,7 @@ A missing, revoked, incompatible, or partially capable ShapeUp endpoint leaves t
 
 Every transport invocation runs under a hard wall-clock bound, so a wedged endpoint expires into the same typed unavailable submission instead of holding the reporting crewmate open.
 The bound defaults to 30 seconds and is overridden by `FM_SHAPEUP_TRANSPORT_TIMEOUT`; an unusable override falls back to the default rather than disabling the bound, and a host with no way to bound a child process refuses the call instead of running it unbounded.
+A transport that cannot be executed at all, and one killed by a signal after writing partial output, both return typed unavailable rather than a success the journal would keep: the bound reports the child's own failure instead of the status of the bytes it managed to emit.
 
 Consequential reports enter the durable Captain Call lifecycle and are not submitted as ordinary ShapeUp updates.
 

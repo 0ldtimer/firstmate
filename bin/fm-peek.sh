@@ -50,6 +50,12 @@ valid_target_id() {
 # would break the very value rule that has to consume the rejoined token. An
 # unstitched row of either shape fails closed onto the next row's first token
 # regardless of the whitespace in front of it.
+# The two separators carry different amounts of evidence, so they are recognized
+# differently. `=` is an assignment and is unambiguous, so any credential-named
+# operand qualifies. `:` is also ordinary prose punctuation, so it needs a whole
+# separator-delimited credential label and an operand long enough to be a secret;
+# otherwise inert telemetry such as `Total tokens: 4821` would be treated as a
+# credential, and a pane-wide inert label would stitch away the next row's event.
 # Stitching never trusts a measured display width. A mid-token wrap leaves the
 # row exactly as wide as the pane, so a row counts as possibly pane-wide when
 # its codepoints plus its non-ASCII codepoints - each of which may occupy two
@@ -59,9 +65,10 @@ valid_target_id() {
 # rows are split apart again unless the rules actually redacted something, so an
 # unrelated row that merely fills the pane keeps its own line and its own event.
 redact_capture() {
-  local names
+  local names labels
   names=$(fm_eng_credential_name_ere)
-  LC_ALL=C awk -v names="$names" '
+  labels=$(fm_eng_credential_label_ere)
+  LC_ALL=C awk -v names="$names" -v labels="$labels" '
     function codepoints(text,   rest) { rest = text; return length(text) - gsub(/[\200-\277]/, "", rest) }
     function multibyte(text,    rest) { rest = text; return gsub(/[\300-\377]/, "", rest) }
     {
@@ -77,7 +84,7 @@ redact_capture() {
         row = line[i]
         if (!open) { carried = pending; pending = 0; open = 1 }
         separated = (row ~ /Bearer$/)
-        contiguous = (row ~ /gh[pousr]_$/ || row ~ ("(" names ")[[:space:]]*[=:]$"))
+        contiguous = (row ~ /gh[pousr]_$/ || row ~ ("(" names ")=$") || row ~ ("(^|[[:space:]])(" labels ")[[:space:]]*:$"))
         dangling = (separated || contiguous)
         stitch = (i < NR && floor > 0 && reach[i] >= floor)
         if (stitch && separated) row = row " "
@@ -101,7 +108,7 @@ redact_capture() {
     -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/g' \
     -e 's/(gh[pousr]_)[A-Za-z0-9_]+/\1[REDACTED]/g' \
     -e "s/($names)=[^[:space:]]+/\\1=[REDACTED]/g" \
-    -e "s/($names)[[:space:]]*:[[:space:]]*[^[:space:]]+/\\1: [REDACTED]/g" \
+    -e "s/(^|[[:space:]])($labels)[[:space:]]*:[[:space:]]*[^[:space:]]{6,}/\\1\\2: [REDACTED]/g" \
     -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
   | LC_ALL=C awk '
     # The leading span list records each stitched row width; the rules cannot

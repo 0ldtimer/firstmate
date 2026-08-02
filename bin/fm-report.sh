@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ENGINEERING="$DATA/engineering"
 MISSIONS="$ENGINEERING/missions"
 REPORTS="$ENGINEERING/reports"
@@ -68,14 +69,19 @@ evidence_root_allows() {  # <file> <mission-json>
 }
 
 SEQUENCE_FILE="$ENGINEERING/reports.sequence"
+SEQUENCE_LOCK="$STATE/fm-report-sequence-lock"
 
-# Acceptance order is FirstMate's own, not the crewmate's. Wall-clock acceptance
-# time is only second-resolution and is pinnable, so a monotonic sequence
-# FirstMate assigns at acceptance decides which of two reports accepted in the
-# same second is the later one. The counter is advanced before the record lands,
-# so an interrupted append can only skip a number, never reuse one.
+trap fm_eng_lock_release_all EXIT
+trap 'fm_eng_lock_release_all; exit 130' INT
+trap 'fm_eng_lock_release_all; exit 143' TERM
+trap 'fm_eng_lock_release_all; exit 129' HUP
+
+# Rebuilding the floor from stored records has to prove it read every expected
+# record: a report the store would not hand over could be the one holding the
+# highest sequence, and a floor below the true maximum reuses a number that two
+# records then share.
 acceptance_sequence_floor() {
-  local file max
+  local file scanned count max
   local -a files=()
   if [ -d "$REPORTS" ]; then
     while IFS= read -r file; do
@@ -87,27 +93,48 @@ acceptance_sequence_floor() {
     printf '0'
     return 0
   fi
-  max=$(printf '%s\0' "${files[@]}" | xargs -0 cat 2>/dev/null \
-    | jq -rn '[inputs | select(type == "object") | .acceptanceSequence? | numbers] | max // 0' 2>/dev/null) || max=''
+  for file in "${files[@]}"; do
+    [ -r "$file" ] || return 1
+  done
+  scanned=$(printf '%s\0' "${files[@]}" | xargs -0 cat 2>/dev/null \
+    | jq -rn '[inputs] as $read
+      | (($read | map(select(type == "object") | .acceptanceSequence? | numbers) | max) // 0) as $max
+      | "\($read | length) \($max)"' 2>/dev/null) || return 1
+  IFS=' ' read -r count max <<EOF
+$scanned
+EOF
+  [ "$count" = "${#files[@]}" ] || return 1
   case "$max" in
-    ''|*[!0-9]*) max=0 ;;
+    ''|*[!0-9]*) return 1 ;;
   esac
-  [ "${#max}" -le 15 ] || max=0
+  [ "${#max}" -le 15 ] || return 1
   printf '%s' "$max"
 }
 
+# Acceptance order is FirstMate's own, not the crewmate's. Wall-clock acceptance
+# time is only second-resolution and is pinnable, so a monotonic sequence
+# FirstMate assigns at acceptance decides which of two reports accepted in the
+# same second is the later one. Allocation runs under the same liveness-safe
+# mutex the Captain intent path uses, so two concurrent appends cannot read the
+# same counter and stamp the same number; the counter is advanced before the
+# record lands, so an interrupted append can only skip a number, never reuse one.
 next_acceptance_sequence() {
   local current='' next
+  fm_eng_lock_acquire_wait "$SEQUENCE_LOCK" "${FM_REPORT_SEQUENCE_LOCK_STALE_MINUTES:-}" "$NOW" \
+    "${FM_REPORT_SEQUENCE_LOCK_ATTEMPTS:-}" || return 1
   if [ -f "$SEQUENCE_FILE" ]; then
     IFS= read -r current < "$SEQUENCE_FILE" || true
     current=${current%%[!0-9]*}
   fi
   case "$current" in
-    ''|*[!0-9]*) current=$(acceptance_sequence_floor) ;;
+    ''|*[!0-9]*) current=$(acceptance_sequence_floor) || { fm_eng_lock_release "$SEQUENCE_LOCK"; return 1; } ;;
   esac
-  [ "${#current}" -le 15 ] || current=$(acceptance_sequence_floor)
+  if [ "${#current}" -gt 15 ]; then
+    current=$(acceptance_sequence_floor) || { fm_eng_lock_release "$SEQUENCE_LOCK"; return 1; }
+  fi
   next=$((current + 1))
-  fm_eng_atomic_write "$SEQUENCE_FILE" "$next" || return 1
+  fm_eng_atomic_write "$SEQUENCE_FILE" "$next" || { fm_eng_lock_release "$SEQUENCE_LOCK"; return 1; }
+  fm_eng_lock_release "$SEQUENCE_LOCK"
   printf '%s' "$next"
 }
 
@@ -206,12 +233,32 @@ validate_evidence() {  # <input> <mission>
 # Projection is a separate durable step from acceptance: an accepted report keeps
 # a typed projection state so an exact replay can retry and heal it. A retry that
 # fails again leaves the existing state untouched so replay stays free of writes.
+# The durable owner reports whether it actually wrote the packet or retained an
+# in-flight resolution record, and only the former is recorded as projected.
 project_condition_packet() {  # <report-path> <mission-id> <condition-id> <lifecycle> <report-json>
-  local path=$1 mission_id=$2 condition_id=$3 lifecycle=$4 report=$5 updated
-  if "$SCRIPT_DIR/fm-decision-hold.sh" project "$mission_id" "$condition_id" \
-    --packet-file "$path" --lifecycle "$lifecycle" >/dev/null; then
-    updated=$(printf '%s' "$report" | jq -c --arg at "$NOW" \
-      '.condition.projection={status:"projected",projectedAt:$at}')
+  local path=$1 mission_id=$2 condition_id=$3 lifecycle=$4 report=$5 updated outcome
+  if outcome=$("$SCRIPT_DIR/fm-decision-hold.sh" project "$mission_id" "$condition_id" \
+    --packet-file "$path" --lifecycle "$lifecycle"); then
+    case "$outcome" in
+      retained:*)
+        updated=$(printf '%s' "$report" | jq -c --arg at "$NOW" '
+          if (.condition.projection.status? // "") == "retained" then .
+          else
+            .condition.projection={
+              status:"retained",
+              attemptedAt:$at,
+              error:{
+                code:"captain_call_resolution_in_flight",
+                message:"The Captain Call carries an in-flight resolution record, so this packet revision was not projected"
+              }
+            }
+          end')
+        ;;
+      *)
+        updated=$(printf '%s' "$report" | jq -c --arg at "$NOW" \
+          '.condition.projection={status:"projected",projectedAt:$at}')
+        ;;
+    esac
   else
     updated=$(printf '%s' "$report" | jq -c --arg at "$NOW" '
       if (.condition.projection.status? // "") == "degraded" then .
@@ -327,9 +374,9 @@ append_report() {  # <path-or-dash>
         "$(printf '%s' "$prior" | jq -r '.error.message')" "$prior"
       return 2
     fi
-    if [ "$(printf '%s' "$prior" | jq -r '.condition.projection.status? // empty')" = degraded ]; then
-      prior=$(heal_condition_projection "$path" "$prior")
-    fi
+    case "$(printf '%s' "$prior" | jq -r '.condition.projection.status? // empty')" in
+      degraded|retained) prior=$(heal_condition_projection "$path" "$prior") ;;
+    esac
     accepted_report_response "$prior" true
     return 0
   fi

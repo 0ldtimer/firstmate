@@ -121,3 +121,27 @@ case "$retained_body" in
   *) fail "re-projection erased the retry identity a partial resolution depends on: $retained_body" ;;
 esac
 pass "projecting a packet never erases a hold's in-flight resolution record"
+
+# Retaining the resolution record is not the same as projecting the packet, so the
+# durable report must not claim a revision the hold never received.
+retained=$(condition_report report-condition-4 scope-widen "2026-08-01T12:08:00Z" |
+  jq '.condition.explanation="A newer packet revision arrives mid-resolution."' |
+  FM_HOME="$HOME_DIR" "$REPORT" append -)
+printf '%s' "$retained" | jq -e '
+  .accepted == true
+  and .report.condition.projection.status == "retained"
+  and .captainCall.projection == "retained"
+  and .captainCall.error.code == "captain_call_resolution_in_flight"
+' >/dev/null || fail "a packet held back by an in-flight resolution must not be recorded as projected: $retained"
+jq -e '.condition.projection.status == "retained"' \
+  "$HOME_DIR/data/engineering/reports/report-condition-4.json" >/dev/null \
+  || fail "the retained projection state must be durable"
+settled=$(cat "$HOME_DIR/data/engineering/reports/report-condition-4.json")
+again=$(condition_report report-condition-4 scope-widen "2026-08-01T12:08:00Z" |
+  jq '.condition.explanation="A newer packet revision arrives mid-resolution."' |
+  FM_HOME="$HOME_DIR" "$REPORT" append -)
+printf '%s' "$again" | jq -e '.accepted == true and .replayed == true and .captainCall.projection == "retained"' >/dev/null \
+  || fail "an exact replay must retry the retained packet and report it: $again"
+[ "$settled" = "$(cat "$HOME_DIR/data/engineering/reports/report-condition-4.json")" ] \
+  || fail "a retry that still cannot project must not rewrite the durable record"
+pass "a packet withheld by an in-flight resolution is typed retained, not projected"

@@ -160,6 +160,60 @@ assert_absent "$HOME_DIR/data/engineering/shapeup-outcomes/report-scope-1.json" 
   "a wedged transport must not journal an outcome"
 pass "a transport that never answers expires into a typed unavailable submission"
 
+# The portable timeout fallback has to type the two ways a bounded child can fail
+# without ever answering: an interpreter that cannot start, and a death by signal
+# after partial output. Neither may be journalled as an authoritative outcome.
+if ! command -v perl >/dev/null 2>&1; then
+  echo "skip: perl is unavailable, so the portable timeout fallback is untestable"
+else
+  BROKEN_TRANSPORT="$TMP_ROOT/shapeup-transport-broken"
+  printf '#!/nonexistent/interpreter\ntrue\n' > "$BROKEN_TRANSPORT"
+  chmod +x "$BROKEN_TRANSPORT"
+  jq --arg t "$BROKEN_TRANSPORT" '.transport.path=$t' "$TMP_ROOT/config-partial.json" > "$HOME_DIR/config/shapeup-client.json"
+  set +e
+  broken=$(FM_HOME="$HOME_DIR" FM_SHAPEUP_FORCE_TIMEOUT_FALLBACK=1 "$CLIENT" submit report-scope-1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a transport that cannot be executed must not look like a submission"
+  printf '%s' "$broken" | jq -e '.accepted == false and .error.code == "shapeup_unavailable"' >/dev/null \
+    || fail "an unexecutable transport must be typed unavailable: $broken"
+  assert_absent "$HOME_DIR/data/engineering/shapeup-outcomes/report-scope-1.json" \
+    "an unexecutable transport must not journal an outcome"
+
+  SIGNAL_TRANSPORT="$TMP_ROOT/shapeup-transport-signal"
+  cat > "$SIGNAL_TRANSPORT" <<'SH'
+#!/usr/bin/env bash
+set -u
+request=$(cat)
+case "$(printf '%s' "$request" | jq -r '.operation')" in
+  capabilities) jq -n '{accepted:true,capabilities:["scope.write","hill.write"]}' ;;
+  submit)
+    jq -n '{accepted:true,outcome:{status:"applied",authoritativeRevision:"shapeup:r12"}}'
+    kill -KILL $$
+    ;;
+esac
+SH
+  chmod +x "$SIGNAL_TRANSPORT"
+  jq --arg t "$SIGNAL_TRANSPORT" '.transport.path=$t' "$TMP_ROOT/config-partial.json" > "$HOME_DIR/config/shapeup-client.json"
+  set +e
+  signalled=$(FM_HOME="$HOME_DIR" FM_SHAPEUP_FORCE_TIMEOUT_FALLBACK=1 "$CLIENT" submit report-scope-1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a transport killed by a signal must not look like a submission"
+  printf '%s' "$signalled" | jq -e '.accepted == false and .error.code == "shapeup_unavailable"' >/dev/null \
+    || fail "a signal-killed transport must be typed unavailable: $signalled"
+  assert_absent "$HOME_DIR/data/engineering/shapeup-outcomes/report-scope-1.json" \
+    "a signal-killed transport must not journal its partial output as authoritative"
+
+  jq --arg t "$TRANSPORT" '.transport.path=$t' "$TMP_ROOT/config-partial.json" > "$HOME_DIR/config/shapeup-client.json"
+  bounded=$(FM_HOME="$HOME_DIR" FM_SHAPEUP_FORCE_TIMEOUT_FALLBACK=1 \
+    SHAPEUP_TEST_ARGC="$ARGC_LOG" SHAPEUP_TEST_EXPECTED_TOKEN=token-one "$CLIENT" submit report-scope-1)
+  printf '%s' "$bounded" | jq -e '.accepted == true and .outcome.status == "applied"' >/dev/null \
+    || fail "the portable fallback must still carry a healthy submission through: $bounded"
+  rm -f "$HOME_DIR/data/engineering/shapeup-outcomes/report-scope-1.json"
+  pass "the portable timeout fallback types a failed exec and a signal death instead of claiming success"
+fi
+
 BENIGN_TRANSPORT="$TMP_ROOT/shapeup-transport-benign"
 cat > "$BENIGN_TRANSPORT" <<'SH'
 #!/usr/bin/env bash

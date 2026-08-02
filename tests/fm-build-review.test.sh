@@ -165,6 +165,32 @@ printf '%s' "$isolated" | jq -e '
   and ([.snapshot.reports[].reportId] | index("report-shape-invalid")) == null
   and ([.snapshot.buildReviews[0].missionSet[].missionId] | sort) == ["mission-42","mission-43"]
 ' >/dev/null || fail "a schema-invalid record must be isolated in invalidRecords, not blank the projection: $isolated"
+
+# Isolation keeps unrelated projection surfaces available, but the Build Review
+# packet can no longer prove it covers every active mission, so it must fail closed
+# and name the records that are holding it back.
+printf '%s' "$isolated" | jq -e '
+  .snapshot.buildReviews[0].ready == false
+  and ([.snapshot.buildReviews[0].isolatedRecords[] | .recordId] | sort)
+    == ["mission-44","report-shape-invalid"]
+  and (.snapshot.conditions | type) == "array"
+' >/dev/null || fail "an isolated active record must keep the Build Review from reporting ready: $isolated"
+isolated_packet=$(printf '%s' "$isolated" | jq -r '.snapshot.buildReviews[0].packetRevision')
+set +e
+isolated_accept=$(jq -n --arg packet "$isolated_packet" '{schemaVersion:"fm-captains-log-projection.v1",operation:"intent",
+  intent:{intentId:"review-accept-isolated",action:"acceptBuildReview",cycleRef:"cycle-13",buildRef:"build-8",packetRevision:$packet}}' |
+  FM_HOME="$HOME_DIR" "$PROJECTION")
+status=$?
+set -e
+[ "$status" -ne 0 ] || fail "acceptance must be refused while an active record is isolated"
+printf '%s' "$isolated_accept" | jq -e '.error.code == "review_records_isolated"' >/dev/null \
+  || fail "an isolated active record must produce its own typed refusal: $isolated_accept"
+acknowledged=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"capabilities"}' |
+  FM_HOME="$HOME_DIR" "$PROJECTION")
+printf '%s' "$acknowledged" | jq -e '.accepted == true and .capabilities.core == "available"' >/dev/null \
+  || fail "unrelated projection capabilities must stay available while a record is isolated: $acknowledged"
+pass "an isolated active mission or report record makes Build Review fail closed with a typed refusal"
+
 rm -f "$HOME_DIR/data/engineering/missions/mission-44.json" \
   "$HOME_DIR/data/engineering/reports/report-shape-invalid.json"
 recovered=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' |

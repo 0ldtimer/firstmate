@@ -38,6 +38,10 @@ Malformed stored records remain visible in `invalidRecords` and never participat
 
 A record that parses but violates the shape this projection derives from it is isolated the same way, as `schema_invalid_record` naming the offending record, so one hand-edited record cannot blank unrelated projection operations or the fleet snapshot's embedded copy.
 
+Isolation keeps the record visible and non-executable, and Build Review then fails closed rather than open: a packet lists the isolated mission and report records that bear on it as `isolatedRecords`, never reports ready while any remain, and refuses acceptance with the typed `review_records_isolated` error, because a shrunken mission set cannot prove it covers every active mission.
+An isolated record whose own correlation is unreadable could belong to any Build, so it withholds readiness across the Review set until the operator repairs it; every other operation stays available throughout.
+Isolation is reported ahead of a Build-revision conflict, because a conflict verdict derived from a mission set that is known to be incomplete is not yet trustworthy.
+
 ## Captain intents
 
 The `intent` operation accepts `acknowledgeCondition`, `resolveCondition`, and `acceptBuildReview` only when the capability document advertises them.
@@ -76,6 +80,8 @@ A consequential report stays accepted when its durable hold cannot receive the p
 
 A degraded packet whose Captain Call is no longer actively held becomes `abandoned` once, so replay stops retrying a projection that can never land.
 
+A packet the durable owner withheld because its Captain Call carries an in-flight resolution record is recorded as the typed `retained` state, never as projected, and an exact replay retries it exactly like a degraded one.
+
 Every projected condition carries its `projection` state, so a held condition that never received its packet is visible to the Captain.
 
 A record store that cannot be read in full, or a Build Review set that cannot be computed, is a typed `projection_unavailable` result, and a condition history that cannot be read in full is a typed `condition_history_unavailable` result; neither is ever reported as a fresh but empty projection.
@@ -103,6 +109,7 @@ Conflicting bound Build revisions keep the packet not ready and return the typed
 The authoritative latest report for terminal state and evidence verification is the one FirstMate accepted last, so a crewmate-supplied capture time cannot pin readiness to a stale record.
 
 Acceptance order is a monotonic `acceptanceSequence` FirstMate assigns as it accepts each report, so two reports accepted inside the same wall-clock second are still ordered by FirstMate rather than by anything the crewmate supplied.
+The sequence is allocated under the same liveness-safe mutex the Captain intent path uses, so concurrent appends into one home cannot be handed the same number, and a store that cannot be read in full is a typed `record_not_durable` refusal rather than an order that repeats.
 
 Superseded missions retain history outside the active set, and deferred missions require a revision-bound Captain decision.
 
@@ -119,7 +126,9 @@ The result contains a closed descriptor and bounded redacted output from `fm-pee
 Redaction runs on the capture's reconstructed logical lines, so a credential the pane wrapped across capture lines is redacted whole instead of releasing the fragment on either side of the wrap.
 Reconstruction fails closed rather than trusting a measured display width, covers a wrap that lands on the space between an introducer and its value, and reads a bounded number of rows above the requested window so a value wrapped across the window edge is redacted too.
 A separator is restored only for an introducer that is genuinely space-separated from its value; an assignment introducer such as `SERVICE_TOKEN=`, `X-Api-Key:`, or `ghp_` rejoins its wrapped value with nothing between the rows, so the value rules still consume the rejoined token whole.
-Redaction recognizes the credential-name vocabulary `bin/fm-engineering-lib.sh` owns for the whole subsystem - token, secret, password, passwd, credential, API key, access key, and private key, in any case - in both assignment and colon-separated form, plus bearer headers, GitHub token prefixes, and PEM private-key headers.
+Redaction recognizes the credential-name vocabulary `bin/fm-engineering-lib.sh` owns for the whole subsystem - token, secret, password, passwd, credential, API key, access key, and private key, in any case - plus bearer headers, GitHub token prefixes, and PEM private-key headers.
+The two separators carry different evidence, so they are matched differently: `=` is an assignment and accepts any credential-named operand, while `:` is also ordinary prose punctuation and additionally requires a whole separator-delimited credential label and an operand long enough to be a secret.
+That keeps inert telemetry such as `Total tokens: 4821` rendered as the pane printed it, and keeps a pane-wide inert label from being read as a dangling introducer that would stitch away the next row's event.
 A row that merely fills the pane without wrapping keeps its own line, so unrelated events are never merged into one.
 
 The operation never attaches an input-capable terminal client and never returns command text, arbitrary arguments, or unrestricted environment values.
