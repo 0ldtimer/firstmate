@@ -110,6 +110,7 @@ The authoritative latest report for terminal state and evidence verification is 
 
 Acceptance order is a monotonic `acceptanceSequence` FirstMate assigns as it accepts each report, so two reports accepted inside the same wall-clock second are still ordered by FirstMate rather than by anything the crewmate supplied.
 The sequence is allocated under the same liveness-safe mutex the Captain intent path uses, so concurrent appends into one home cannot be handed the same number, and a store that cannot be read in full is a typed `record_not_durable` refusal rather than an order that repeats.
+That mutex distinguishes contention from a store that can never hold a lock: contention is waited out for a bound expressed in seconds, while an un-creatable lock directory is refused at once rather than after the whole wait, and the Captain intent path reports the two as `intent_busy` and `intent_lock_unavailable`.
 
 Superseded missions retain history outside the active set, and deferred missions require a revision-bound Captain decision.
 
@@ -127,8 +128,10 @@ Redaction runs on the capture's reconstructed logical lines, so a credential the
 Reconstruction fails closed rather than trusting a measured display width, covers a wrap that lands on the space between an introducer and its value, and reads a bounded number of rows above the requested window so a value wrapped across the window edge is redacted too.
 A separator is restored only for an introducer that is genuinely space-separated from its value; an assignment introducer such as `SERVICE_TOKEN=`, `X-Api-Key:`, or `ghp_` rejoins its wrapped value with nothing between the rows, so the value rules still consume the rejoined token whole.
 Redaction recognizes the credential-name vocabulary `bin/fm-engineering-lib.sh` owns for the whole subsystem - token, secret, password, passwd, credential, API key, access key, and private key, in any case - plus bearer headers, GitHub token prefixes, and PEM private-key headers.
-The two separators carry different evidence, so they are matched differently: `=` is an assignment and accepts any credential-named operand, while `:` is also ordinary prose punctuation and additionally requires a whole separator-delimited credential label and an operand long enough to be a secret.
-That keeps inert telemetry such as `Total tokens: 4821` rendered as the pane printed it, and keeps a pane-wide inert label from being read as a dangling introducer that would stitch away the next row's event.
+The two separators carry different evidence, so they are matched differently: `=` is an assignment and accepts any credential-named operand, while `:` is also ordinary prose punctuation and asks for more.
+A colon label must be one the credential word ends - anything may be glued in front of it, so `apitoken` and `dbpassword` qualify, and only separator-delimited components may follow it, so the inert plural `tokens` does not - and it may be quoted or bracketed the way a pane echoing JSON or a config fragment writes it.
+Its operand must then give one of two independent signals: it closes the line, the way a credential header's value does, or it is long enough to be a secret wherever it sits.
+That redacts a short value such as `Password: hunt3` and a mid-line one such as `api_key: sk_live_… (rotated)`, while inert telemetry such as `Total tokens: 4821 in this run` gives neither signal and renders as the pane printed it, and a pane-wide inert label is never read as a dangling introducer that would stitch away the next row's event.
 A row that merely fills the pane without wrapping keeps its own line, so unrelated events are never merged into one.
 
 The operation never attaches an input-capable terminal client and never returns command text, arbitrary arguments, or unrestricted environment values.

@@ -251,6 +251,44 @@ for secret in "$HEADER_VALUE" "$PREFIXED_VALUE" "$SUFFIXED_VALUE" "$BARE_VALUE";
 done
 pass "colon-separated credential headers are redacted whatever surrounds the credential word"
 
+# A credential label is often a glued lowercase key, its value is sometimes short,
+# and a pane echoing JSON or a config fragment quotes both. None of those may
+# escape the colon form, and a value that does not end its line must still be
+# caught when it is long enough to be a secret on its own.
+GLUED_CAPTURE="$TMP_ROOT/glued-colon-capture.txt"
+: > "$GLUED_CAPTURE"
+GLUED_TOKEN_VALUE='fm_fake_glued123'
+GLUED_PASSWORD_VALUE='fm_fake_glued456'
+SHORT_VALUE='hunt3'
+QUOTED_VALUE='sk_fm_fake_quoted1'
+QUOTED_SECRET_VALUE='fm_fake_quoted2'
+MIDLINE_VALUE='fm_fake_mid1'
+# Widths ascend so only the last row can be pane-wide.
+pane_row "$GLUED_CAPTURE" 15 "Password: $SHORT_VALUE"
+pane_row "$GLUED_CAPTURE" 26 "apitoken: $GLUED_TOKEN_VALUE"
+pane_row "$GLUED_CAPTURE" 28 "dbpassword: $GLUED_PASSWORD_VALUE"
+pane_row "$GLUED_CAPTURE" 31 "api_key: $MIDLINE_VALUE (rotated)"
+pane_row "$GLUED_CAPTURE" 33 "{\"api_key\": \"$QUOTED_VALUE\"}"
+pane_row "$GLUED_CAPTURE" 35 "  \"clientsecret\": \"$QUOTED_SECRET_VALUE\""
+glued=$(peek_capture "$GLUED_CAPTURE" 20)
+glued_inspection=$(inspect_capture "$GLUED_CAPTURE" 20)
+printf '%s' "$glued" | jq -e '
+  .available == true
+  and (.capture.text | contains("Password: [REDACTED]"))
+  and (.capture.text | contains("apitoken: [REDACTED]"))
+  and (.capture.text | contains("dbpassword: [REDACTED]"))
+  and (.capture.text | contains("api_key: [REDACTED]"))
+  and (.capture.text | contains("clientsecret\": [REDACTED]"))
+' >/dev/null || fail "glued, short, quoted, and mid-line colon secrets must all be redacted: $glued"
+for secret in "$GLUED_TOKEN_VALUE" "$GLUED_PASSWORD_VALUE" "$QUOTED_VALUE" "$QUOTED_SECRET_VALUE" "$MIDLINE_VALUE"; do
+  refute_fragments "machine peek" "$glued" "$secret"
+  refute_fragments "session inspection" "$glued_inspection" "$secret"
+done
+case "$(printf '%s' "$glued" | jq -r '.capture.text')" in
+  *"$SHORT_VALUE"*) fail "a short colon-form secret was released in the clear: $glued" ;;
+esac
+pass "glued credential labels, short values, and quoted labels are all redacted"
+
 # A two-column glyph makes a row occupy the whole pane while counting fewer
 # codepoints than a plain row beside it, so the wrap must not be recognized by
 # a measured width that a wide glyph can hide.

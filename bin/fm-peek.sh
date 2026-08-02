@@ -52,10 +52,13 @@ valid_target_id() {
 # regardless of the whitespace in front of it.
 # The two separators carry different amounts of evidence, so they are recognized
 # differently. `=` is an assignment and is unambiguous, so any credential-named
-# operand qualifies. `:` is also ordinary prose punctuation, so it needs a whole
-# separator-delimited credential label and an operand long enough to be a secret;
-# otherwise inert telemetry such as `Total tokens: 4821` would be treated as a
-# credential, and a pane-wide inert label would stitch away the next row's event.
+# operand qualifies. `:` is also ordinary prose punctuation, so it asks for a label
+# whose credential word ends it and for one of two independent signals from the
+# operand: it either closes the line, the way a credential header's value does, or
+# it is long enough to be a secret wherever it sits. Inert telemetry such as
+# `Total tokens: 4821 in this run` gives neither signal - its label is a glued
+# plural and its operand is short and mid-sentence - so it renders as the pane
+# printed it, and a pane-wide inert label never stitches away the next row's event.
 # Stitching never trusts a measured display width. A mid-token wrap leaves the
 # row exactly as wide as the pane, so a row counts as possibly pane-wide when
 # its codepoints plus its non-ASCII codepoints - each of which may occupy two
@@ -65,10 +68,12 @@ valid_target_id() {
 # rows are split apart again unless the rules actually redacted something, so an
 # unrelated row that merely fills the pane keeps its own line and its own event.
 redact_capture() {
-  local names labels
+  local names labels anchor quotes
   names=$(fm_eng_credential_name_ere)
   labels=$(fm_eng_credential_label_ere)
-  LC_ALL=C awk -v names="$names" -v labels="$labels" '
+  anchor=$(fm_eng_credential_label_anchor)
+  quotes="[\"']*"
+  LC_ALL=C awk -v names="$names" -v labels="$labels" -v anchor="$anchor" -v quotes="$quotes" '
     function codepoints(text,   rest) { rest = text; return length(text) - gsub(/[\200-\277]/, "", rest) }
     function multibyte(text,    rest) { rest = text; return gsub(/[\300-\377]/, "", rest) }
     {
@@ -84,7 +89,7 @@ redact_capture() {
         row = line[i]
         if (!open) { carried = pending; pending = 0; open = 1 }
         separated = (row ~ /Bearer$/)
-        contiguous = (row ~ /gh[pousr]_$/ || row ~ ("(" names ")=$") || row ~ ("(^|[[:space:]])(" labels ")[[:space:]]*:$"))
+        contiguous = (row ~ /gh[pousr]_$/ || row ~ ("(" names ")=$") || row ~ ("(^|" anchor ")(" labels ")" quotes "[[:space:]]*:$"))
         dangling = (separated || contiguous)
         stitch = (i < NR && floor > 0 && reach[i] >= floor)
         if (stitch && separated) row = row " "
@@ -108,7 +113,8 @@ redact_capture() {
     -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/g' \
     -e 's/(gh[pousr]_)[A-Za-z0-9_]+/\1[REDACTED]/g' \
     -e "s/($names)=[^[:space:]]+/\\1=[REDACTED]/g" \
-    -e "s/(^|[[:space:]])($labels)[[:space:]]*:[[:space:]]*[^[:space:]]{6,}/\\1\\2: [REDACTED]/g" \
+    -e "s/(^|$anchor)($labels$quotes)[[:space:]]*:[[:space:]]*${quotes}[^[:space:]]{6,}/\\1\\2: [REDACTED]/g" \
+    -e "s/(^|$anchor)($labels$quotes)[[:space:]]*:[[:space:]]*${quotes}[^[:space:]]+\$/\\1\\2: [REDACTED]/" \
     -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
   | LC_ALL=C awk '
     # The leading span list records each stitched row width; the rules cannot

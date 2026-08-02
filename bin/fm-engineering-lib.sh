@@ -42,10 +42,11 @@ fm_eng_read_json() {  # <path-or-dash> [max-bytes]
 # are matched without regard to case.
 FM_ENG_CREDENTIAL_NAMES='TOKEN SECRET PASSWORD PASSWD CREDENTIAL API[-_]?KEY ACCESS[-_]?KEY PRIVATE[-_]?KEY'
 
-# The ERE form spells every letter as an explicit two-case bracket instead of
-# relying on a case-insensitivity flag, which awk has no portable form of and
-# sed only carries as an extension.
-fm_eng_credential_name_ere() {
+# The alternation is built once here and wrapped by each consumer, so no form has
+# to parse another form's output to recover it. Every letter is spelled as an
+# explicit two-case bracket instead of relying on a case-insensitivity flag, which
+# awk has no portable form of and sed only carries as an extension.
+fm_eng_credential_alternation() {
   local word rest letter pair out alt=''
   for word in $FM_ENG_CREDENTIAL_NAMES; do
     out=''
@@ -66,7 +67,11 @@ fm_eng_credential_name_ere() {
     done
     alt="${alt}${alt:+|}$out"
   done
-  printf '[A-Za-z0-9_]*(%s)[A-Za-z0-9_]*' "$alt"
+  printf '%s' "$alt"
+}
+
+fm_eng_credential_name_ere() {
+  printf '[A-Za-z0-9_]*(%s)[A-Za-z0-9_]*' "$(fm_eng_credential_alternation)"
 }
 
 fm_eng_credential_name_regex() {
@@ -74,16 +79,20 @@ fm_eng_credential_name_regex() {
 }
 
 # A colon is both the credential-header separator and ordinary prose punctuation,
-# so the colon form matches a narrower label: the vocabulary word must be a whole
-# separator-delimited component of the name rather than merely a substring of one.
-# `SERVICE_TOKEN`, `X-Api-Key`, and `AWS_ACCESS_KEY_ID` qualify; the inert plural
-# telemetry label `tokens` does not, because its word is glued to a trailing run.
+# so the colon form requires the credential word to end the label: anything may be
+# glued in front of it and only separator-delimited components may follow it.
+# `apitoken`, `dbpassword`, `SERVICE_TOKEN`, `X-Api-Key`, and `aws_access_key_id`
+# all qualify, while the inert plural telemetry label `tokens` does not, because a
+# trailing run is glued to its word rather than separated from it.
 fm_eng_credential_label_ere() {
-  local names word
-  names=$(fm_eng_credential_name_ere)
-  word=${names#'[A-Za-z0-9_]*('}
-  word=${word%')[A-Za-z0-9_]*'}
-  printf '([A-Za-z0-9]+[-_])*(%s)([-_][A-Za-z0-9]+)*' "$word"
+  printf '[A-Za-z0-9_-]*(%s)([-_][A-Za-z0-9]+)*' "$(fm_eng_credential_alternation)"
+}
+
+# A credential header may be quoted or bracketed by the surrounding config or JSON
+# a pane echoes, so the label boundary admits those delimiters as well as
+# whitespace and the start of the line.
+fm_eng_credential_label_anchor() {
+  printf '%s' "[]\"',{}()[[:space:]]"
 }
 
 # Stored records are scanned for credential-named keys, known secret value
@@ -124,7 +133,9 @@ fm_eng_atomic_write() {  # <path> <json>
 }
 
 FM_ENG_LOCK_HOST=${HOSTNAME:-$(hostname 2>/dev/null || printf 'unknown-host')}
-FM_ENG_LOCK_HELD=''
+# Held locks are tracked as array elements rather than a joined string so a home
+# whose path contains a space still releases the directory it actually holds.
+FM_ENG_LOCK_HELD_DIRS=()
 FM_ENG_PROCESS_START_METHOD=lstart
 
 fm_eng_lock_stale_minutes() {  # <requested>
@@ -211,55 +222,90 @@ fm_eng_lock_reclaim() {  # <lock-dir> <stale-minutes>
 
 fm_eng_lock_release_all() {
   local dir
-  [ -n "$FM_ENG_LOCK_HELD" ] || return 0
-  for dir in $FM_ENG_LOCK_HELD; do
+  [ "${#FM_ENG_LOCK_HELD_DIRS[@]}" -gt 0 ] || return 0
+  for dir in "${FM_ENG_LOCK_HELD_DIRS[@]}"; do
     fm_eng_lock_remove "$dir"
   done
-  FM_ENG_LOCK_HELD=''
+  FM_ENG_LOCK_HELD_DIRS=()
 }
 
 fm_eng_lock_release() {  # <lock-dir>
-  local dir kept=''
-  for dir in ${FM_ENG_LOCK_HELD:-}; do
-    [ "$dir" = "$1" ] || kept="${kept}${kept:+ }$dir"
-  done
-  FM_ENG_LOCK_HELD=$kept
+  local dir
+  local -a kept=()
+  if [ "${#FM_ENG_LOCK_HELD_DIRS[@]}" -gt 0 ]; then
+    for dir in "${FM_ENG_LOCK_HELD_DIRS[@]}"; do
+      [ "$dir" = "$1" ] || kept[${#kept[@]}]=$dir
+    done
+  fi
+  if [ "${#kept[@]}" -gt 0 ]; then
+    FM_ENG_LOCK_HELD_DIRS=("${kept[@]}")
+  else
+    FM_ENG_LOCK_HELD_DIRS=()
+  fi
   fm_eng_lock_remove "$1"
 }
 
 # The mutex is a mkdir the filesystem serializes, and the owner record is what
-# makes reclaiming it safe rather than a blind timeout.
+# makes reclaiming it safe rather than a blind timeout. Contention and a store that
+# cannot hold a lock at all are separate answers: status 1 means another owner has
+# it and waiting can help, status 2 means it can never be taken here.
 fm_eng_lock_acquire() {  # <lock-dir> <stale-minutes> <recorded-at>
   local dir=$1 stale started
   stale=$(fm_eng_lock_stale_minutes "${2:-}")
-  mkdir -p "$(dirname "$dir")" 2>/dev/null || return 1
+  mkdir -p "$(dirname "$dir")" 2>/dev/null || return 2
   if ! mkdir "$dir" 2>/dev/null; then
     fm_eng_lock_reclaim "$dir" "$stale"
-    mkdir "$dir" 2>/dev/null || return 1
+    if ! mkdir "$dir" 2>/dev/null; then
+      [ -d "$dir" ] || return 2
+      return 1
+    fi
   fi
-  FM_ENG_LOCK_HELD="${FM_ENG_LOCK_HELD}${FM_ENG_LOCK_HELD:+ }$dir"
+  FM_ENG_LOCK_HELD_DIRS[${#FM_ENG_LOCK_HELD_DIRS[@]}]=$dir
   started=$(fm_eng_process_start_signature "$$") || started=unknown
   printf 'host=%s\npid=%s\nstarted=%s\nacquiredAt=%s\n' \
     "$FM_ENG_LOCK_HOST" "$$" "$started" "${3:-}" > "$dir/owner" 2>/dev/null || true
 }
 
-# Contending for a shared counter is normal rather than an error, so this waits a
-# bounded time instead of refusing. Every attempt goes through the reclaim path,
-# so a holder that crashed cannot wedge the wait, and an expired wait is a typed
-# refusal rather than an unbounded block.
-fm_eng_lock_acquire_wait() {  # <lock-dir> <stale-minutes> <recorded-at> [attempts]
-  local attempts=${4:-100} index=0
-  case "$attempts" in
-    ''|*[!0-9]*|0) attempts=100 ;;
-  esac
-  while [ "$index" -lt "$attempts" ]; do
-    if fm_eng_lock_acquire "$1" "${2:-}" "${3:-}"; then
-      return 0
+FM_ENG_LOCK_PAUSE_UNIT=''
+
+# The wait is expressed in seconds, so the bound a caller asks for is the bound it
+# gets whether or not this host's sleep accepts a fraction.
+fm_eng_lock_pause_unit() {
+  if [ -z "$FM_ENG_LOCK_PAUSE_UNIT" ]; then
+    if sleep 0.05 2>/dev/null; then
+      FM_ENG_LOCK_PAUSE_UNIT=0.05
+    else
+      FM_ENG_LOCK_PAUSE_UNIT=1
     fi
+  fi
+  printf '%s' "$FM_ENG_LOCK_PAUSE_UNIT"
+}
+
+# Contending for a shared counter is normal rather than an error, so this waits a
+# bounded time instead of refusing. Every attempt goes through the reclaim path, so
+# a holder that crashed cannot wedge the wait. A store that can never hold the lock
+# is not contention and is refused at once rather than after the whole wait.
+fm_eng_lock_acquire_wait() {  # <lock-dir> <stale-minutes> <recorded-at> [seconds]
+  local seconds=${4:-5} unit attempts index=0 status
+  case "$seconds" in
+    ''|*[!0-9]*|0) seconds=5 ;;
+  esac
+  [ "${#seconds}" -le 4 ] || seconds=5
+  unit=$(fm_eng_lock_pause_unit)
+  if [ "$unit" = 1 ]; then
+    attempts=$seconds
+  else
+    attempts=$((seconds * 20))
+  fi
+  while :; do
+    fm_eng_lock_acquire "$1" "${2:-}" "${3:-}"
+    status=$?
+    [ "$status" -eq 0 ] && return 0
+    [ "$status" -eq 1 ] || return "$status"
     index=$((index + 1))
-    sleep 0.05 2>/dev/null || sleep 1
+    [ "$index" -lt "$attempts" ] || return 1
+    sleep "$unit"
   done
-  return 1
 }
 
 fm_eng_validate_correlation() {  # <json> <mission> <task> <crewmate>

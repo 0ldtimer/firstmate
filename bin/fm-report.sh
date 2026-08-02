@@ -121,7 +121,7 @@ EOF
 next_acceptance_sequence() {
   local current='' next
   fm_eng_lock_acquire_wait "$SEQUENCE_LOCK" "${FM_REPORT_SEQUENCE_LOCK_STALE_MINUTES:-}" "$NOW" \
-    "${FM_REPORT_SEQUENCE_LOCK_ATTEMPTS:-}" || return 1
+    "${FM_REPORT_SEQUENCE_LOCK_WAIT_SECONDS:-}" || return 1
   if [ -f "$SEQUENCE_FILE" ]; then
     IFS= read -r current < "$SEQUENCE_FILE" || true
     current=${current%%[!0-9]*}

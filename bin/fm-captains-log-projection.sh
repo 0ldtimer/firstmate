@@ -449,10 +449,12 @@ intent_response() {  # <intent-json>
     2) return 2 ;;
   esac
   lock_dir="$STATE/fm-projection-intent-locks/$intent_id"
-  fm_eng_lock_acquire "$lock_dir" "${FM_PROJECTION_INTENT_LOCK_STALE_MINUTES:-}" "$NOW" || {
-    fail_json intent_busy "The intent is already being processed"
-    return 2
-  }
+  fm_eng_lock_acquire "$lock_dir" "${FM_PROJECTION_INTENT_LOCK_STALE_MINUTES:-}" "$NOW"
+  case $? in
+    0) ;;
+    1) fail_json intent_busy "The intent is already being processed"; return 2 ;;
+    *) fail_json intent_lock_unavailable "The intent mutex could not be created, so the intent was not applied"; return 2 ;;
+  esac
   trap fm_eng_lock_release_all RETURN
   replay_prior_outcome "$record" "$digest_value"
   case $? in

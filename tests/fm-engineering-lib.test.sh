@@ -106,17 +106,41 @@ test_credential_label_form_is_whole_token() {
   labels=$(fm_eng_credential_label_ere)
   # The colon form has to accept a real credential label whatever vendor prefix or
   # suffix surrounds the credential word.
-  for name in SERVICE_TOKEN X-Api-Key aws_access_key_id AWS_SECRET_ACCESS_KEY Password access-key api_key; do
+  # The colon form has to accept a real credential label whatever vendor prefix or
+  # suffix surrounds the credential word, including a glued lowercase prefix of the
+  # kind YAML, .env, and config dumps echo.
+  for name in SERVICE_TOKEN X-Api-Key aws_access_key_id AWS_SECRET_ACCESS_KEY Password access-key api_key \
+    apitoken dbpassword myapikey clientsecret; do
     printf '%s:x\n' "$name" | LC_ALL=C grep -Eq "^($labels):" \
       || fail "the credential label vocabulary does not match $name: $labels"
   done
   # A credential word glued to a trailing run is an inert telemetry label, not a
   # credential name, and must not become a colon-form introducer.
-  for name in tokens secrets passwords credentials keys tokenized; do
+  for name in tokens secrets passwords credentials keys tokenized secretive; do
     ! printf '%s:x\n' "$name" | LC_ALL=C grep -Eq "^($labels):" \
       || fail "the credential label vocabulary matched the inert plural label $name"
   done
   pass "fm_eng_credential_label_ere matches whole credential labels, not inert plurals"
+}
+
+test_credential_label_anchor_admits_delimiters() {
+  local anchor labels
+  anchor=$(fm_eng_credential_label_anchor)
+  labels=$(fm_eng_credential_label_ere)
+  # A pane echoing JSON or a config fragment quotes and brackets its labels, so the
+  # boundary has to admit those delimiters rather than only whitespace.
+  local case quotes='["'"'"']*'
+  for case in '{"api_key": "x"}' " \"password\": \"x\"" '[access-key: x]' '(dbpassword: x)'; do
+    printf '%s\n' "$case" | LC_ALL=C grep -Eq "(^|$anchor)($labels$quotes)[[:space:]]*:" \
+      || fail "the label boundary does not admit the delimiter in: $case"
+  done
+  # The boundary must not turn an inert plural into a label just because a
+  # delimiter sits in front of it.
+  for case in '{"tokens": 4821}' '(secrets: none)'; do
+    ! printf '%s\n' "$case" | LC_ALL=C grep -Eq "(^|$anchor)($labels$quotes)[[:space:]]*:" \
+      || fail "the label boundary admitted an inert plural in: $case"
+  done
+  pass "fm_eng_credential_label_anchor admits quoted and bracketed credential labels"
 }
 
 test_locks_are_liveness_safe() {
@@ -146,6 +170,62 @@ test_locks_are_liveness_safe() {
     || fail "a lock whose owner is provably gone must be reclaimed"
   fm_eng_lock_release_all
   pass "fm_eng_lock_acquire serializes live owners and reclaims provably dead ones"
+}
+
+test_locks_survive_paths_with_spaces() {
+  local base="$TMP_ROOT/My Locks/state" one two
+  one="$base/first lock"
+  two="$base/second lock"
+  mkdir -p "$base"
+  # A home whose path contains a space must still release the directory it holds,
+  # or every run leaks one lock per identity under state/.
+  fm_eng_lock_acquire "$one" 5 "2026-08-02T00:00:00Z" || fail "a spaced lock path must be acquirable"
+  fm_eng_lock_release_all
+  [ ! -d "$one" ] || fail "release_all left a lock whose path contains a space behind"
+
+  fm_eng_lock_acquire "$one" 5 "2026-08-02T00:00:00Z" || fail "a spaced lock path must be re-acquirable"
+  fm_eng_lock_acquire "$two" 5 "2026-08-02T00:00:00Z" || fail "a second spaced lock path must be acquirable"
+  fm_eng_lock_release "$one"
+  [ ! -d "$one" ] || fail "release did not remove the spaced lock it was given"
+  [ -d "$two" ] || fail "releasing one spaced lock must not release another"
+  fm_eng_lock_release_all
+  [ ! -d "$two" ] || fail "release_all left a second spaced lock behind"
+  pass "held-lock bookkeeping releases every lock whose path contains a space"
+}
+
+test_lock_wait_fails_fast_on_permanent_failure() {
+  local sealed="$TMP_ROOT/sealed" status started elapsed
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "skip: permanent lock-failure coverage needs a non-root user"
+    return 0
+  fi
+  mkdir -p "$sealed"
+  chmod 500 "$sealed"
+  # A store that can never hold the lock is not contention, so the wait must refuse
+  # at once instead of burning its whole bound on a condition that cannot change.
+  started=$(date +%s)
+  set +e
+  fm_eng_lock_acquire_wait "$sealed/nested/lock" 5 "2026-08-02T00:00:00Z" 5
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  chmod 700 "$sealed"
+  [ "$status" -ne 0 ] || fail "an un-creatable lock parent must not report success"
+  [ "$elapsed" -le 2 ] || fail "a permanent lock failure waited ${elapsed}s instead of refusing at once"
+
+  local contended="$TMP_ROOT/contended/lock"
+  fm_eng_lock_acquire "$contended" 5 "2026-08-02T00:00:00Z" || fail "the contention fixture could not be set up"
+  started=$(date +%s)
+  set +e
+  ( fm_eng_lock_acquire_wait "$contended" 5 "2026-08-02T00:00:00Z" 2 )
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  fm_eng_lock_release_all
+  [ "$status" -ne 0 ] || fail "a lock held by a live owner must not be handed to a waiter"
+  [ "$elapsed" -ge 1 ] || fail "contention must actually be waited out, not refused at once"
+  [ "$elapsed" -le 6 ] || fail "the contention wait ran ${elapsed}s past its 2s bound"
+  pass "fm_eng_lock_acquire_wait waits out contention and refuses a permanent failure at once"
 }
 
 test_reads_are_bounded_and_closed() {
@@ -286,7 +366,10 @@ test_identities_stay_privacy_safe
 test_credential_material_is_detected
 test_credential_vocabulary_is_shared
 test_credential_label_form_is_whole_token
+test_credential_label_anchor_admits_delimiters
 test_locks_are_liveness_safe
+test_locks_survive_paths_with_spaces
+test_lock_wait_fails_fast_on_permanent_failure
 test_reads_are_bounded_and_closed
 test_canonical_form_is_revision_stable
 test_writes_are_atomic_and_leave_no_residue
