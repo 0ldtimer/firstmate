@@ -97,3 +97,27 @@ snapshot=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operat
 printf '%s' "$snapshot" | jq -e '.snapshot.conditions[0].lifecycle == "resolved"' >/dev/null \
   || fail "resolved Captain Call lifecycle was not projected: $snapshot"
 pass "Captain Call packets update independently and resolve through one durable completion owner"
+
+# A resolution that fails after recording the decision leaves the retry identity
+# in the hold body. Re-projecting a packet over it would erase the record an exact
+# retry needs, leaving the hold permanently unresolvable.
+widen=$(condition_report report-condition-3 scope-widen "2026-08-01T12:07:00Z" |
+  FM_HOME="$HOME_DIR" "$REPORT" append -)
+printf '%s' "$widen" | jq -e '.accepted == true and .report.condition.holdId == "mission-42-decision-scope-widen"' >/dev/null \
+  || fail "the widening Captain Call did not raise its own hold: $widen"
+partial=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: routed-widen-work\n\nCaptain decision:\nWiden the Scope.\n\nRouted work:\n- routed-widen-work\n' \
+  "0000000000000000000000000000000000000000000000000000000000000000")
+(cd "$HOME_DIR" && tasks-axi update mission-42-decision-scope-widen --body "$partial" >/dev/null)
+projected=$(FM_HOME="$HOME_DIR" "$DECISIONS" project mission-42 scope-widen \
+  --packet-file "$HOME_DIR/data/engineering/reports/report-condition-3.json" --lifecycle resolving)
+case "$projected" in
+  retained:*) ;;
+  *) fail "projecting over a partial resolution must report the retained record: $projected" ;;
+esac
+retained_body=$(cd "$HOME_DIR" && tasks-axi show mission-42-decision-scope-widen --full |
+  sed -n 's/^  body: //p' | head -1)
+case "$retained_body" in
+  *"Resolution recorded by fm-decision-hold."*"routed-widen-work"*) ;;
+  *) fail "re-projection erased the retry identity a partial resolution depends on: $retained_body" ;;
+esac
+pass "projecting a packet never erases a hold's in-flight resolution record"

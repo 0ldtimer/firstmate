@@ -36,6 +36,8 @@ Every snapshot carries a source revision and capture time.
 
 Malformed stored records remain visible in `invalidRecords` and never participate in conditions, Review readiness, or executable outcomes.
 
+A record that parses but violates the shape this projection derives from it is isolated the same way, as `schema_invalid_record` naming the offending record, so one hand-edited record cannot blank unrelated projection operations or the fleet snapshot's embedded copy.
+
 ## Captain intents
 
 The `intent` operation accepts `acknowledgeCondition`, `resolveCondition`, and `acceptBuildReview` only when the capability document advertises them.
@@ -58,6 +60,8 @@ Captain acceptance records `captainAccepted` and explicitly leaves delivery, Sha
 
 Unknown conditions, unavailable Review packets, changed packet revisions, unsupported actions, and identity conflicts return distinct typed errors.
 
+An outcome the store could not accept returns the typed `outcome_not_durable` error, because an intent is only accepted once its durable outcome has landed.
+
 ## Reports, evidence, and Review
 
 `bin/fm-mission.sh accept` binds an Engineering mission to one Build revision and adds instructions to establish initial Scopes when possible and continue reporting until the mission is terminal.
@@ -78,6 +82,8 @@ A record store that cannot be read in full, or a Build Review set that cannot be
 
 Every scan proves it read each expected record, so a partially readable store is a typed failure rather than a silently truncated history.
 
+Every durable write is checked, so a mission, report, or outcome the store could not accept returns the typed `record_not_durable` or `outcome_not_durable` error instead of an accepted result the store does not hold.
+
 Hill judgments are qualitative and may move backward as learning changes the execution picture.
 
 Numeric progress fields are rejected because task count, elapsed time, evidence count, terminal output, and process activity cannot determine Hill position.
@@ -96,6 +102,8 @@ Conflicting bound Build revisions keep the packet not ready and return the typed
 
 The authoritative latest report for terminal state and evidence verification is the one FirstMate accepted last, so a crewmate-supplied capture time cannot pin readiness to a stale record.
 
+Acceptance order is a monotonic `acceptanceSequence` FirstMate assigns as it accepts each report, so two reports accepted inside the same wall-clock second are still ordered by FirstMate rather than by anything the crewmate supplied.
+
 Superseded missions retain history outside the active set, and deferred missions require a revision-bound Captain decision.
 
 Any mission-set, report, evidence, execution, or Build-revision change produces a new packet revision and invalidates pending acceptance.
@@ -110,6 +118,8 @@ The result contains a closed descriptor and bounded redacted output from `fm-pee
 
 Redaction runs on the capture's reconstructed logical lines, so a credential the pane wrapped across capture lines is redacted whole instead of releasing the fragment on either side of the wrap.
 Reconstruction fails closed rather than trusting a measured display width, covers a wrap that lands on the space between an introducer and its value, and reads a bounded number of rows above the requested window so a value wrapped across the window edge is redacted too.
+A separator is restored only for an introducer that is genuinely space-separated from its value; an assignment introducer such as `SERVICE_TOKEN=`, `X-Api-Key:`, or `ghp_` rejoins its wrapped value with nothing between the rows, so the value rules still consume the rejoined token whole.
+Redaction recognizes the credential-name vocabulary `bin/fm-engineering-lib.sh` owns for the whole subsystem - token, secret, password, passwd, credential, API key, access key, and private key, in any case - in both assignment and colon-separated form, plus bearer headers, GitHub token prefixes, and PEM private-key headers.
 A row that merely fills the pane without wrapping keeps its own line, so unrelated events are never merged into one.
 
 The operation never attaches an input-capable terminal client and never returns command text, arbitrary arguments, or unrestricted environment values.

@@ -16,6 +16,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-engineering-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-engineering-lib.sh"
 
 machine_error() {  # <code> <message>
   jq -n --arg code "$1" --arg message "$2" \
@@ -39,11 +42,13 @@ valid_target_id() {
 # stitched into one logical line before the single-line rules run, so a value -
 # or the introducer itself - split across the wrap is matched whole, and a
 # multi-row value stays a single token the value rules consume entirely.
-# A pane that wrapped on the space separating an introducer from its value
-# leaves no split token to stitch, and the space itself lands either at the end
-# of one row (where the pane strips it) or at the start of the next. Both shapes
-# leave a bare introducer at a row end: a stitched row gets the separating space
-# back, and an unstitched one fails closed onto the next row's first token
+# An introducer left bare at a row end is one of two shapes, and only one of them
+# lost a separator to the wrap. A space-separated introducer such as `Bearer` did
+# lose the space, so a stitched row gets it back. An assignment introducer such as
+# `SERVICE_TOKEN=` or `X-Api-Key:` is contiguous with its value, so the wrap landed
+# mid-token and the rows rejoin with nothing between them; inserting a space there
+# would break the very value rule that has to consume the rejoined token. An
+# unstitched row of either shape fails closed onto the next row's first token
 # regardless of the whitespace in front of it.
 # Stitching never trusts a measured display width. A mid-token wrap leaves the
 # row exactly as wide as the pane, so a row counts as possibly pane-wide when
@@ -54,7 +59,9 @@ valid_target_id() {
 # rows are split apart again unless the rules actually redacted something, so an
 # unrelated row that merely fills the pane keeps its own line and its own event.
 redact_capture() {
-  LC_ALL=C awk '
+  local names
+  names=$(fm_eng_credential_name_ere)
+  LC_ALL=C awk -v names="$names" '
     function codepoints(text,   rest) { rest = text; return length(text) - gsub(/[\200-\277]/, "", rest) }
     function multibyte(text,    rest) { rest = text; return gsub(/[\300-\377]/, "", rest) }
     {
@@ -69,9 +76,11 @@ redact_capture() {
       for (i = 1; i <= NR; i++) {
         row = line[i]
         if (!open) { carried = pending; pending = 0; open = 1 }
-        dangling = (row ~ /(Bearer|gh[pousr]_|[A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*=)$/)
+        separated = (row ~ /Bearer$/)
+        contiguous = (row ~ /gh[pousr]_$/ || row ~ ("(" names ")[[:space:]]*[=:]$"))
+        dangling = (separated || contiguous)
         stitch = (i < NR && floor > 0 && reach[i] >= floor)
-        if (stitch && dangling) row = row " "
+        if (stitch && separated) row = row " "
         logical = logical row
         spans = spans (spans == "" ? "" : ",") length(row)
         if (stitch) continue
@@ -91,7 +100,8 @@ redact_capture() {
   ' | LC_ALL=C sed -E \
     -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/g' \
     -e 's/(gh[pousr]_)[A-Za-z0-9_]+/\1[REDACTED]/g' \
-    -e 's/([A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*)=[^[:space:]]+/\1=[REDACTED]/g' \
+    -e "s/($names)=[^[:space:]]+/\\1=[REDACTED]/g" \
+    -e "s/($names)[[:space:]]*:[[:space:]]*[^[:space:]]+/\\1: [REDACTED]/g" \
     -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
   | LC_ALL=C awk '
     # The leading span list records each stitched row width; the rules cannot

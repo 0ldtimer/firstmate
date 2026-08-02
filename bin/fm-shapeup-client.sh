@@ -70,11 +70,40 @@ load_credential() {  # <config-json>
   printf '%s' "$token"
 }
 
+# A non-positive bound is not a bound, so an unusable override falls back to the
+# default rather than disabling the deadline.
+TRANSPORT_TIMEOUT=${FM_SHAPEUP_TRANSPORT_TIMEOUT:-30}
+case "$TRANSPORT_TIMEOUT" in
+  ''|*[!0-9]*|0*) TRANSPORT_TIMEOUT=30 ;;
+esac
+
+# The transport is an operator-configured foreign process, so it runs under a
+# hard wall-clock bound: a wedged endpoint must become a typed unavailable
+# submission instead of holding the reporting crewmate open indefinitely. The
+# bound mirrors bin/fm-fleet-snapshot.sh's run_timed selection so a macOS host
+# without coreutils still gets one, and it is assembled as argv rather than
+# wrapped in a shell function so the credential assignment prefixes an external
+# command and can never outlive the transport call.
 transport_call() {  # <config-json> <credential> <request-json>
-  local config=$1 credential=$2 request=$3 transport response value
+  local config=$1 credential=$2 request=$3 transport response value status
+  local -a runner=()
   transport=$(printf '%s' "$config" | jq -r '.transport.path')
   [ -f "$transport" ] && [ -x "$transport" ] || return 3
-  response=$(printf '%s' "$request" | SHAPEUP_WORKSPACE_TOKEN="$credential" "$transport" 2>/dev/null) || return 4
+  if command -v timeout >/dev/null 2>&1; then
+    runner=(timeout "$TRANSPORT_TIMEOUT")
+  elif command -v gtimeout >/dev/null 2>&1; then
+    runner=(gtimeout "$TRANSPORT_TIMEOUT")
+  elif command -v perl >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # Perl source, not shell: its sigils are literal.
+    runner=(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$TRANSPORT_TIMEOUT")
+  else
+    return 8
+  fi
+  response=$(printf '%s' "$request" \
+    | SHAPEUP_WORKSPACE_TOKEN="$credential" "${runner[@]}" "$transport" 2>/dev/null)
+  status=$?
+  [ "$status" -ne 124 ] || return 7
+  [ "$status" -eq 0 ] || return 4
   value=$(printf '%s' "$response" | jq -ce 'select(type == "object")' 2>/dev/null) || return 5
   [ -n "$value" ] || return 5
   fm_eng_contains_credentials "$value" && return 6
@@ -84,6 +113,8 @@ transport_call() {  # <config-json> <credential> <request-json>
 transport_fail() {  # <status> <unavailable-message>
   case "$1" in
     6) client_fail credential_material "The ShapeUp transport response carried credential material" ;;
+    7) client_fail shapeup_unavailable "$2" transport_timeout ;;
+    8) client_fail shapeup_unavailable "$2" transport_unbounded ;;
     *) client_fail shapeup_unavailable "$2" ;;
   esac
 }
@@ -123,7 +154,7 @@ capabilities() {
 }
 
 submit() {  # <report-id>
-  local report_id=$1 report report_digest record prior prior_digest config credential capability caps request response outcome tmp detail status
+  local report_id=$1 report report_digest record prior prior_digest config credential capability caps request response outcome detail status
   fm_eng_valid_identity "$report_id" || { client_fail malformed_identity "Invalid reportId"; return 2; }
   [ -f "$REPORTS/$report_id.json" ] || { client_fail report_not_found "Validated report is absent"; return 2; }
   report=$(jq -c . "$REPORTS/$report_id.json" 2>/dev/null) || { client_fail malformed_record "Report record is unreadable"; return 2; }
@@ -206,10 +237,11 @@ submit() {  # <report-id>
   outcome=$(printf '%s' "$response" | jq -c --arg reportId "$report_id" --arg reportRevision "$report_digest" --arg recordedAt "$NOW" '
     .outcome + {reportId:$reportId,reportRevision:$reportRevision,recordedAt:$recordedAt,replayed:false}
   ')
-  mkdir -p "$OUTCOMES"
-  tmp="$record.$$"
-  jq -cn --arg requestDigest "$report_digest" --argjson outcome "$outcome" \
-    '{requestDigest:$requestDigest,outcome:$outcome}' > "$tmp" && mv "$tmp" "$record"
+  fm_eng_atomic_write "$record" "$(jq -cn --arg requestDigest "$report_digest" --argjson outcome "$outcome" \
+    '{requestDigest:$requestDigest,outcome:$outcome}')" || {
+    client_fail outcome_not_durable "The authoritative ShapeUp outcome could not be journalled durably"
+    return 2
+  }
   jq -cn --arg schemaVersion "$SCHEMA" --argjson outcome "$outcome" \
     '{accepted:true,schemaVersion:$schemaVersion,outcome:$outcome}'
 }

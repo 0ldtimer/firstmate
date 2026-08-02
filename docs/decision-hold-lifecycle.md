@@ -32,6 +32,7 @@ A failed intermediate step leaves the hold open.
 The `project` subcommand extends that same hold with a structured Captain Call packet revision and a raised, updated, or resolving lifecycle.
 It requires an active hold and a packet file containing one condition, so projection cannot create a second attention store or completion owner.
 It keeps the human decision context first in the hold body and appends only the durable record identity and packet revision, never the private packet path.
+A hold that already carries a resolution record is mid-resolution, so `project` retains that record and reports `retained` instead of overwriting the retry identity an exact `resolve` retry needs to finish a partial routing operation.
 
 The `status --json` subcommand returns the condition identity, hold identity, packet revision, typed lifecycle, and durable held state without projecting its private packet path.
 The Captain's Log projection uses the existing `resolve` subcommand for supported `resolveCondition` intent and records resolved lifecycle only after the durable completion owner succeeds.
@@ -81,6 +82,7 @@ ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuin
 
 $ bash tests/fm-decision-hold.test.sh
 ok - Captain Call packets update independently and resolve through one durable completion owner
+ok - projecting a packet never erases a hold's in-flight resolution record
 
 $ bash tests/fm-report.test.sh
 ok - a Captain Call packet that cannot be projected stays accepted, typed, and heals on exact replay
@@ -95,7 +97,8 @@ ok - the intent mutex recovers from crashes without ever reclaiming a live owner
 $ bash tests/fm-build-review.test.sh
 ok - Build Review binds the active mission/evidence revision and acceptance is not closeout
 ok - one Build Review packet spans every active mission and refuses conflicting revisions
-ok - a Build Review set that cannot be computed degrades to a typed unavailable projection
+ok - a schema-invalid stored record stays visible and non-executable without blanking the projection
+ok - Review readiness follows FirstMate acceptance order, not crewmate capture time
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

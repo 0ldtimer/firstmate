@@ -372,7 +372,7 @@ EOF
 }
 
 command_project() {
-  local origin=${1:-} key=${2:-} packet_file='' lifecycle='' id packet packet_revision packet_record body
+  local origin=${1:-} key=${2:-} packet_file='' lifecycle='' id packet packet_revision packet_record body hold_body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -397,6 +397,17 @@ command_project() {
   id=$(hold_id "$origin" "$key")
   require_tasks_axi
   verify_hold_active "$id"
+  # A hold that already carries a resolution record is mid-resolution: that
+  # record is the retry identity `resolve` needs to finish a partially completed
+  # routing operation, so projecting a packet over it would make the hold
+  # permanently unresolvable.
+  hold_body=$(show_field "$(task_show "$id")" body)
+  case "$hold_body" in
+    *"Resolution recorded by fm-decision-hold."*)
+      printf 'retained: %s %s resolution-record\n' "$id" "$lifecycle"
+      return 0
+      ;;
+  esac
   body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.\n\nFirstMate Captain Call packet.\nLifecycle: %s\nPacket record: %s\nPacket revision: %s' \
     "$origin" "$key" "$lifecycle" "$packet_record" "$packet_revision")
   tasks_axi update "$id" --body "$body" >/dev/null \

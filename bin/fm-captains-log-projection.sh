@@ -153,9 +153,59 @@ trap 'release_intent_lock; exit 130' INT
 trap 'release_intent_lock; exit 143' TERM
 trap 'release_intent_lock; exit 129' HUP
 
+# A record that parses but violates the shape this projection derives from it is
+# isolated exactly like an unparseable one. Otherwise a single hand-edited record
+# raises a jq type error inside a downstream computation and blanks every
+# unrelated projection operation, including the fleet snapshot's embedded copy.
+# Only the fields a record actually participates through are constrained, and
+# only while it participates: a rejected report or a superseded mission is never
+# read as execution truth, so its stored shape is not held to that bar.
+partition_records() {  # <records-json> <kind> <malformed-json> <record-id>...
+  local records=$1 kind=$2 malformed=$3
+  shift 3
+  jq -cn --argjson records "$records" --arg kind "$kind" --argjson malformed "$malformed" '
+    def optional($value; $expected): ($value | type) as $actual | $actual == "null" or $actual == $expected;
+    def member($value; $key): if ($value | type) == "object" then $value[$key] else null end;
+    def shaped:
+      if $kind == "mission" then
+        ((.state // "accepted") != "accepted")
+        or (optional(.correlation; "object")
+          and optional(member(.correlation; "shapeUp"); "object")
+          and optional(.evidenceRequirements; "array"))
+      elif $kind == "report" then
+        (.status != "accepted")
+        or (optional(.correlation; "object")
+          and optional(member(.correlation; "shapeUp"); "object")
+          and optional(.condition; "object")
+          and optional(.evidence; "object")
+          and optional(member(.evidence; "verification"); "object")
+          and optional(.outcome; "object"))
+      elif $kind == "outcome" then
+        optional(.intent; "object") and optional(.outcome; "object")
+      else
+        optional(.outcome; "object")
+      end;
+    [ range($records | length) as $index
+      | {recordId:($ARGS.positional[$index] // ""), record:$records[$index]} ]
+    | {
+        records:[ .[] | select(.record | shaped) | .record ],
+        invalid:($malformed + [ .[]
+          | select(.record | shaped | not)
+          | {
+              kind:$kind,
+              recordId:.recordId,
+              error:{
+                code:"schema_invalid_record",
+                message:"Record does not match the projection record shape"
+              }
+            } ])
+      }
+  ' --args "$@"
+}
+
 collect_records() {  # <dir> <kind>
-  local dir=$1 kind=$2 file records invalid
-  local -a files=() valid=() malformed=()
+  local dir=$1 kind=$2 file records malformed_json='[]'
+  local -a files=() valid=() names=() malformed=()
   if [ -d "$dir" ]; then
     while IFS= read -r file; do
       [ -n "$file" ] || continue
@@ -169,31 +219,37 @@ collect_records() {  # <dir> <kind>
   if records=$(printf '%s\0' "${files[@]}" | xargs -0 cat 2>/dev/null | jq -cn '[inputs]' 2>/dev/null) \
     && [ "$(printf '%s' "$records" | jq -r 'length')" = "${#files[@]}" ] \
     && [ "$(printf '%s' "$records" | jq -r 'all(type == "object")')" = true ]; then
-    jq -cn --argjson records "$records" '{records:$records,invalid:[]}'
+    valid=("${files[@]}")
+  else
+    for file in "${files[@]}"; do
+      if jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+        valid[${#valid[@]}]=$file
+      else
+        malformed[${#malformed[@]}]=$(basename "$file" .json)
+      fi
+    done
+    records='[]'
+    if [ "${#valid[@]}" -gt 0 ]; then
+      records=$(printf '%s\0' "${valid[@]}" | xargs -0 cat 2>/dev/null \
+        | jq -cn '[inputs | select(type == "object")]') || return 1
+      [ -n "$records" ] || return 1
+      [ "$(printf '%s' "$records" | jq -r 'length')" = "${#valid[@]}" ] || return 1
+    fi
+    if [ "${#malformed[@]}" -gt 0 ]; then
+      malformed_json=$(jq -cn --arg kind "$kind" '
+        [ $ARGS.positional[]
+          | {kind:$kind,recordId:.,error:{code:"malformed_record",message:"Record is not a valid JSON object"}} ]
+      ' --args "${malformed[@]}") || return 1
+    fi
+  fi
+  if [ "${#valid[@]}" -eq 0 ]; then
+    jq -cn --argjson invalid "$malformed_json" '{records:[],invalid:$invalid}'
     return 0
   fi
-  for file in "${files[@]}"; do
-    if jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
-      valid[${#valid[@]}]=$file
-    else
-      malformed[${#malformed[@]}]=$(basename "$file" .json)
-    fi
+  for file in "${valid[@]}"; do
+    names[${#names[@]}]=$(basename "$file" .json)
   done
-  records='[]'
-  if [ "${#valid[@]}" -gt 0 ]; then
-    records=$(printf '%s\0' "${valid[@]}" | xargs -0 cat 2>/dev/null \
-      | jq -cn '[inputs | select(type == "object")]') || return 1
-    [ -n "$records" ] || return 1
-    [ "$(printf '%s' "$records" | jq -r 'length')" = "${#valid[@]}" ] || return 1
-  fi
-  invalid='[]'
-  if [ "${#malformed[@]}" -gt 0 ]; then
-    invalid=$(jq -cn --arg kind "$kind" '
-      [ $ARGS.positional[]
-        | {kind:$kind,recordId:.,error:{code:"malformed_record",message:"Record is not a valid JSON object"}} ]
-    ' --args "${malformed[@]}") || return 1
-  fi
-  jq -cn --argjson records "$records" --argjson invalid "$invalid" '{records:$records,invalid:$invalid}'
+  partition_records "$records" "$kind" "$malformed_json" "${names[@]}"
 }
 
 condition_projection() {  # <reports-json> <outcomes-json>
@@ -201,7 +257,12 @@ condition_projection() {  # <reports-json> <outcomes-json>
     [ $reports[]
       | select(.condition? and (.condition | type == "object"))
       | select(.status? == "accepted")
-      | {
+    ]
+    | sort_by(.missionId,.condition.conditionId,.acceptedAt // "",.acceptanceSequence // 0,.reportId)
+    | group_by([.missionId,.condition.conditionId])
+    | map(last)
+    | map(
+        {
           reportId:.reportId,
           missionId:.missionId,
           conditionId:.condition.conditionId,
@@ -222,11 +283,7 @@ condition_projection() {  # <reports-json> <outcomes-json>
           scopeRef:(.correlation.shapeUp.scopeRef // null),
           capturedAt:(.capturedAt // ""),
           acceptedAt:(.acceptedAt // "")
-        }
-    ]
-    | sort_by(.missionId,.conditionId,.acceptedAt,.capturedAt,.reportId)
-    | group_by([.missionId,.conditionId])
-    | map(last)
+        })
     | map(. as $condition
       | .lifecycle = (
           [ $outcomes[]
@@ -243,7 +300,7 @@ condition_projection() {  # <reports-json> <outcomes-json>
 build_reviews() {  # <missions-json> <reports-json> <outcomes-json>
   local missions=$1 reports=$2 outcomes=$3
   jq -cn --argjson missions "$missions" --argjson reports "$reports" --argjson outcomes "$outcomes" '
-    def authoritative: sort_by(.acceptedAt // "",.capturedAt // "",.reportId) | last // null;
+    def authoritative: sort_by(.acceptedAt // "",.acceptanceSequence // 0,.reportId) | last // null;
     def terminal($missionId):
       ([ $reports[]
         | select(.status == "accepted" and .missionId == $missionId)
@@ -304,23 +361,30 @@ build_reviews() {  # <missions-json> <reports-json> <outcomes-json>
   '
 }
 
+# Packet material is emitted once, hashed once per packet, and reattached in a
+# single pass, so attaching n revisions costs O(n) work rather than reserializing
+# the whole Review set on every packet.
 review_revisions() {  # <reviews-json>
-  local reviews=$1 count index material revision result='[]'
+  local reviews=$1 count material revision
+  local -a revisions=()
   count=$(printf '%s' "$reviews" | jq -r 'if type == "array" then length else "invalid" end') || return 1
   case "$count" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  index=0
-  while [ "$index" -lt "$count" ]; do
-    material=$(printf '%s' "$reviews" | jq -r --argjson index "$index" '.[$index].packetMaterial') || return 1
+  if [ "$count" -eq 0 ]; then
+    printf '[]'
+    return 0
+  fi
+  while IFS= read -r material; do
     revision=$(printf '%s' "$material" | digest) || return 1
     [ -n "$revision" ] || return 1
-    result=$(jq -cn --argjson result "$result" --argjson reviews "$reviews" \
-      --argjson index "$index" --arg revision "$revision" '
-      $result + [$reviews[$index] | del(.packetMaterial) | . + {packetRevision:$revision}]') || return 1
-    index=$((index + 1))
-  done
-  printf '%s' "$result"
+    revisions[${#revisions[@]}]=$revision
+  done < <(printf '%s' "$reviews" | jq -r '.[].packetMaterial')
+  [ "${#revisions[@]}" -eq "$count" ] || return 1
+  jq -cn --argjson reviews "$reviews" '
+    [ range($reviews | length) as $index
+      | $reviews[$index] | del(.packetMaterial) | . + {packetRevision:$ARGS.positional[$index]} ]
+  ' --args "${revisions[@]}"
 }
 
 snapshot_json() {
@@ -539,7 +603,11 @@ intent_response() {  # <intent-json>
     mkdir -p "$ENGINEERING/decisions"
     decision_file="$ENGINEERING/decisions/$intent_id.txt"
     tmp="$decision_file.$$"
-    printf '%s\n' "$decision" > "$tmp" && mv "$tmp" "$decision_file"
+    if ! { printf '%s\n' "$decision" > "$tmp" 2>/dev/null && mv "$tmp" "$decision_file" 2>/dev/null; }; then
+      rm -f "$tmp" 2>/dev/null || true
+      fail_json decision_resolution_failed "The Captain decision could not be stored durably"
+      return 2
+    fi
     "$SCRIPT_DIR/fm-decision-hold.sh" resolve "$mission_id" "$condition_id" \
       --decision-file "$decision_file" "${route_args[@]}" >/dev/null || {
       fail_json decision_resolution_failed "Captain decision could not be routed durably"
@@ -561,9 +629,14 @@ intent_response() {  # <intent-json>
       implications:{delivery:false,buildCloseout:false,cycleClose:false}
     }
   ')
-  tmp="$record.$$"
-  jq -cn --arg requestDigest "$digest_value" --argjson intent "$intent" --argjson outcome "$outcome" \
-    '{requestDigest:$requestDigest,intent:$intent,outcome:$outcome}' > "$tmp" && mv "$tmp" "$record"
+  # The outcome store is what makes an intent durable and replayable, so an
+  # outcome that did not land is never reported as accepted.
+  fm_eng_atomic_write "$record" "$(jq -cn --arg requestDigest "$digest_value" \
+    --argjson intent "$intent" --argjson outcome "$outcome" \
+    '{requestDigest:$requestDigest,intent:$intent,outcome:$outcome}')" || {
+    fail_json outcome_not_durable "The intent outcome could not be recorded durably"
+    return 2
+  }
   jq -cn --arg schemaVersion "$SCHEMA" --argjson outcome "$outcome" \
     '{accepted:true,schemaVersion:$schemaVersion,outcome:$outcome}'
 }

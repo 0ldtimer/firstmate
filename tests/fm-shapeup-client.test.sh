@@ -130,6 +130,36 @@ leak_projection=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1",
 assert_not_contains "$leak_projection" "ghp_leaked_from_upstream" "the projection republished the leaked credential"
 pass "transport responses carrying credential material never become durable projection state"
 
+# A wedged endpoint must not hold the reporting crewmate open: the transport runs
+# under a hard wall-clock bound and its expiry is the ordinary typed unavailable
+# submission, with the validated report left intact.
+HANGING_TRANSPORT="$TMP_ROOT/shapeup-transport-hanging"
+cat > "$HANGING_TRANSPORT" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat >/dev/null
+exec sleep 120
+SH
+chmod +x "$HANGING_TRANSPORT"
+jq --arg t "$HANGING_TRANSPORT" '.transport.path=$t' "$TMP_ROOT/config-partial.json" > "$HOME_DIR/config/shapeup-client.json"
+started=$(date +%s)
+set +e
+hung=$(FM_HOME="$HOME_DIR" FM_SHAPEUP_TRANSPORT_TIMEOUT=2 "$CLIENT" submit report-scope-1)
+status=$?
+set -e
+elapsed=$(( $(date +%s) - started ))
+[ "$status" -ne 0 ] || fail "a transport that never answers must not look like a submission"
+printf '%s' "$hung" | jq -e '
+  .accepted == false
+  and .error.code == "shapeup_unavailable"
+  and (.error.detailCode | IN("transport_timeout","transport_unbounded"))
+' >/dev/null || fail "a wedged transport must be typed unavailable: $hung"
+[ "$elapsed" -lt 60 ] || fail "the transport call was not bounded; it ran for ${elapsed}s"
+[ -f "$HOME_DIR/data/engineering/reports/report-scope-1.json" ] || fail "a wedged transport lost the crewmate report"
+assert_absent "$HOME_DIR/data/engineering/shapeup-outcomes/report-scope-1.json" \
+  "a wedged transport must not journal an outcome"
+pass "a transport that never answers expires into a typed unavailable submission"
+
 BENIGN_TRANSPORT="$TMP_ROOT/shapeup-transport-benign"
 cat > "$BENIGN_TRANSPORT" <<'SH'
 #!/usr/bin/env bash

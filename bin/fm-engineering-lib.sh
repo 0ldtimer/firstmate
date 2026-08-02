@@ -37,16 +37,59 @@ fm_eng_read_json() {  # <path-or-dash> [max-bytes]
   printf '%s' "$value" | jq -ce 'select(type == "object")'
 }
 
+# The credential-name vocabulary is owned once here so record scanning and pane
+# redaction recognize the same names. Each entry is an ERE fragment whose letters
+# are matched without regard to case.
+FM_ENG_CREDENTIAL_NAMES='TOKEN SECRET PASSWORD PASSWD CREDENTIAL API[-_]?KEY ACCESS[-_]?KEY PRIVATE[-_]?KEY'
+
+# The ERE form spells every letter as an explicit two-case bracket instead of
+# relying on a case-insensitivity flag, which awk has no portable form of and
+# sed only carries as an extension.
+fm_eng_credential_name_ere() {
+  local word rest letter pair out alt=''
+  for word in $FM_ENG_CREDENTIAL_NAMES; do
+    out=''
+    rest=$word
+    while [ -n "$rest" ]; do
+      letter=${rest%"${rest#?}"}
+      rest=${rest#?}
+      case "$letter" in
+        [A-Za-z])
+          for pair in Aa Bb Cc Dd Ee Ff Gg Hh Ii Jj Kk Ll Mm Nn Oo Pp Qq Rr Ss Tt Uu Vv Ww Xx Yy Zz; do
+            case "$pair" in
+              *"$letter"*) out="${out}[$pair]"; break ;;
+            esac
+          done
+          ;;
+        *) out="$out$letter" ;;
+      esac
+    done
+    alt="${alt}${alt:+|}$out"
+  done
+  printf '[A-Za-z0-9_]*(%s)[A-Za-z0-9_]*' "$alt"
+}
+
+fm_eng_credential_name_regex() {
+  printf '%s' "$FM_ENG_CREDENTIAL_NAMES" | LC_ALL=C tr 'A-Z ' 'a-z|'
+}
+
+# Stored records are scanned for credential-named keys, known secret value
+# shapes, and assignment-shaped values. The assignment shape is deliberately
+# narrower than pane redaction's: prose that merely names a credential after a
+# colon is ordinary Captain and crewmate language and must stay storable.
 fm_eng_contains_credentials() {  # <json>
-  printf '%s' "$1" | jq -e '
+  local names
+  names=$(fm_eng_credential_name_regex)
+  printf '%s' "$1" | jq -e --arg names "$names" '
     . as $root
     | any(paths(scalars);
         . as $path
         | ($root | getpath($path)) as $value
         | ($value | type == "string")
           and (
-            (($path[-1] | tostring | ascii_downcase) | test("token|secret|credential|password"))
+            (($path[-1] | tostring | ascii_downcase) | test($names))
             or ($value | test("gh[pousr]_[A-Za-z0-9]|Bearer[[:space:]]+|BEGIN[[:space:]]+(RSA[[:space:]]+)?PRIVATE[[:space:]]+KEY"; "i"))
+            or ($value | test("[A-Za-z0-9_]*(" + $names + ")[A-Za-z0-9_]*=[^[:space:]]"; "i"))
           ))
   ' >/dev/null 2>&1
 }
@@ -55,10 +98,16 @@ fm_eng_canonical() {  # <json>
   printf '%s' "$1" | jq -cS .
 }
 
+# A durable record either lands whole or reports failure; callers must never
+# publish an outcome the store did not accept.
 fm_eng_atomic_write() {  # <path> <json>
   local path=$1 value=$2 tmp="$1.$$"
-  mkdir -p "$(dirname "$path")"
-  printf '%s\n' "$value" > "$tmp" && mv "$tmp" "$path"
+  mkdir -p "$(dirname "$path")" 2>/dev/null || return 1
+  if printf '%s\n' "$value" > "$tmp" 2>/dev/null && mv "$tmp" "$path" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 fm_eng_validate_correlation() {  # <json> <mission> <task> <crewmate>

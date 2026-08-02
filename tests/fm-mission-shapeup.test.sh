@@ -64,3 +64,34 @@ set -e
 printf '%s' "$secret" | jq -e '.error.code == "credential_material"' >/dev/null \
   || fail "credential rejection must be typed: $secret"
 pass "mission data rejects credential material"
+
+# A state change stores an identity, so free-form prose must never reach the
+# durable mission record the projection republishes verbatim.
+mission_path="$HOME_DIR/data/engineering/missions/mission-42.json"
+for bad in 'customer@example.test wants this dropped' '' 'mission 43' '../escape'; do
+  set +e
+  refused=$(FM_HOME="$HOME_DIR" "$MISSION" supersede mission-42 --replacement "$bad" 2>/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "supersede must refuse the non-identity replacement '$bad'"
+  printf '%s' "$refused" | jq -e '.accepted == false and .error.code == "malformed_identity"' >/dev/null \
+    || fail "a non-identity replacement must be typed: $refused"
+done
+jq -e '.state == "accepted" and (has("replacementMissionId") | not)' "$mission_path" >/dev/null \
+  || fail "a refused state change must not touch the durable mission record"
+
+for bad in 'ask ops which decision' 'decision;rm -rf'; do
+  set +e
+  refused=$(FM_HOME="$HOME_DIR" "$MISSION" defer mission-42 --decision-id "$bad" --build-revision "build-8:r7" 2>/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "defer must refuse the non-identity decision '$bad'"
+  printf '%s' "$refused" | jq -e '.accepted == false and .error.code == "malformed_identity"' >/dev/null \
+    || fail "a non-identity deferring decision must be typed: $refused"
+done
+
+superseded=$(FM_HOME="$HOME_DIR" "$MISSION" supersede mission-42 --replacement mission-43)
+printf '%s' "$superseded" | jq -e '
+  .accepted == true and .mission.state == "superseded" and .mission.replacementMissionId == "mission-43"
+' >/dev/null || fail "a privacy-safe replacement identity must still be accepted: $superseded"
+pass "mission state changes only store privacy-safe identities"

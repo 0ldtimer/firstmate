@@ -161,6 +161,50 @@ for secret in "$SPLIT_VALUE" "$BOUNDARY_VALUE" "$STRIPPED_VALUE" "$ONELINE_VALUE
 done
 pass "a credential wrapped at the pane width is redacted across the capture line boundary"
 
+# An assignment introducer is contiguous with its value, so a wrap right after
+# the `=` or `:` must rejoin with nothing between the rows. Reinserting a
+# separator there would leave the value on the far side of a space the value rule
+# cannot cross, releasing it in the clear.
+ASSIGN_CAPTURE="$TMP_ROOT/assign-capture.txt"
+: > "$ASSIGN_CAPTURE"
+ASSIGN_VALUE='fm_fake_31TassignWrappedValueQQQQQ'
+COLON_VALUE='fm_fake_44CcolonWrappedValueWWWWW'
+GH_WRAP_VALUE='fmfake55TokenWrappedAcrossTheRow'
+PASSWD_VALUE='fm_fake_66pwdvalue'
+AWS_KEY_VALUE='fm_fake_77akid'
+LOWER_KEY_VALUE='fm_fake_88lowercase'
+pane_row "$ASSIGN_CAPTURE" 12 'tests passed'
+pane_row "$ASSIGN_CAPTURE" 40 'deploy step 4 of 9        SERVICE_TOKEN='
+pane_row "$ASSIGN_CAPTURE" 34 "$ASSIGN_VALUE"
+pane_row "$ASSIGN_CAPTURE" 40 'deploy step 4 of 9            X-Api-Key:'
+pane_row "$ASSIGN_CAPTURE" 33 "$COLON_VALUE"
+pane_row "$ASSIGN_CAPTURE" 40 'deploy step 4 of 9                  ghp_'
+pane_row "$ASSIGN_CAPTURE" 32 "$GH_WRAP_VALUE"
+# The same credential vocabulary on rows the pane never wrapped.
+pane_row "$ASSIGN_CAPTURE" 25 "PASSWD=$PASSWD_VALUE"
+pane_row "$ASSIGN_CAPTURE" 32 "AWS_ACCESS_KEY_ID=$AWS_KEY_VALUE"
+pane_row "$ASSIGN_CAPTURE" 27 "api_key=$LOWER_KEY_VALUE"
+pane_row "$ASSIGN_CAPTURE" 27 'no lifecycle authority here'
+
+assigned=$(peek_capture "$ASSIGN_CAPTURE" 20)
+assigned_inspection=$(inspect_capture "$ASSIGN_CAPTURE" 20)
+printf '%s' "$assigned" | jq -e '
+  .available == true
+  and (.capture.text | contains("SERVICE_TOKEN=[REDACTED]"))
+  and (.capture.text | contains("X-Api-Key: [REDACTED]"))
+  and (.capture.text | contains("ghp_[REDACTED]"))
+  and (.capture.text | contains("PASSWD=[REDACTED]"))
+  and (.capture.text | contains("AWS_ACCESS_KEY_ID=[REDACTED]"))
+  and (.capture.text | contains("api_key=[REDACTED]"))
+  and (.capture.text | contains("tests passed"))
+  and (.capture.text | contains("no lifecycle authority here"))
+' >/dev/null || fail "assignment-shaped credentials must be redacted across the wrap: $assigned"
+for secret in "$ASSIGN_VALUE" "$COLON_VALUE" "$GH_WRAP_VALUE" "$PASSWD_VALUE" "$AWS_KEY_VALUE" "$LOWER_KEY_VALUE"; do
+  refute_fragments "machine peek" "$assigned" "$secret"
+  refute_fragments "session inspection" "$assigned_inspection" "$secret"
+done
+pass "a credential wrapped straight after its assignment separator is redacted, not released"
+
 # A two-column glyph makes a row occupy the whole pane while counting fewer
 # codepoints than a plain row beside it, so the wrap must not be recognized by
 # a measured width that a wide glyph can hide.

@@ -44,6 +44,9 @@ When the configuration exists, accepted ordinary Scope and Hill reports invoke t
 
 A missing, revoked, incompatible, or partially capable ShapeUp endpoint leaves the FirstMate report accepted and returns only the affected submission as typed unavailable.
 
+Every transport invocation runs under a hard wall-clock bound, so a wedged endpoint expires into the same typed unavailable submission instead of holding the reporting crewmate open.
+The bound defaults to 30 seconds and is overridden by `FM_SHAPEUP_TRANSPORT_TIMEOUT`; an unusable override falls back to the default rather than disabling the bound, and a host with no way to bound a child process refuses the call instead of running it unbounded.
+
 Consequential reports enter the durable Captain Call lifecycle and are not submitted as ordinary ShapeUp updates.
 
 ## Idempotency and failures
@@ -58,7 +61,9 @@ Reusing a report identity after its accepted revision changes returns `identity_
 
 Capability absence returns `capability_unavailable`, a changed ShapeUp guard returns `shapeup_stale`, and an action requiring a proposal returns `proposal_required`.
 
-Transport, credential, negotiation, and unknown remote failures return `shapeup_unavailable` without exposing the credential or deleting the source report.
+Transport, credential, negotiation, expiry, and unknown remote failures return `shapeup_unavailable` without exposing the credential or deleting the source report, and expiry carries the `transport_timeout` detail code.
+
+An authoritative outcome the store could not accept returns the typed `outcome_not_durable` error rather than a success the journal cannot replay.
 
 The client suppresses transport standard error and never includes the credential in requests, arguments, stored reports, outcomes, or diagnostics.
 

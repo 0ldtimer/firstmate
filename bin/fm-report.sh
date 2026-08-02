@@ -67,6 +67,50 @@ evidence_root_allows() {  # <file> <mission-json>
   return 1
 }
 
+SEQUENCE_FILE="$ENGINEERING/reports.sequence"
+
+# Acceptance order is FirstMate's own, not the crewmate's. Wall-clock acceptance
+# time is only second-resolution and is pinnable, so a monotonic sequence
+# FirstMate assigns at acceptance decides which of two reports accepted in the
+# same second is the later one. The counter is advanced before the record lands,
+# so an interrupted append can only skip a number, never reuse one.
+acceptance_sequence_floor() {
+  local file max
+  local -a files=()
+  if [ -d "$REPORTS" ]; then
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      files[${#files[@]}]=$file
+    done < <(find "$REPORTS" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
+  fi
+  if [ "${#files[@]}" -eq 0 ]; then
+    printf '0'
+    return 0
+  fi
+  max=$(printf '%s\0' "${files[@]}" | xargs -0 cat 2>/dev/null \
+    | jq -rn '[inputs | select(type == "object") | .acceptanceSequence? | numbers] | max // 0' 2>/dev/null) || max=''
+  case "$max" in
+    ''|*[!0-9]*) max=0 ;;
+  esac
+  [ "${#max}" -le 15 ] || max=0
+  printf '%s' "$max"
+}
+
+next_acceptance_sequence() {
+  local current='' next
+  if [ -f "$SEQUENCE_FILE" ]; then
+    IFS= read -r current < "$SEQUENCE_FILE" || true
+    current=${current%%[!0-9]*}
+  fi
+  case "$current" in
+    ''|*[!0-9]*) current=$(acceptance_sequence_floor) ;;
+  esac
+  [ "${#current}" -le 15 ] || current=$(acceptance_sequence_floor)
+  next=$((current + 1))
+  fm_eng_atomic_write "$SEQUENCE_FILE" "$next" || return 1
+  printf '%s' "$next"
+}
+
 CONDITION_SCAN_EMPTY='{"latest":null,"nextSequence":1}'
 
 condition_scan_filter() {  # <mission-id> <condition-id> <file>...
@@ -80,7 +124,7 @@ condition_scan_filter() {  # <mission-id> <condition-id> <file>...
         latest:([ $records[]
           | select(.status == "accepted" and .missionId == $missionId
             and .condition.conditionId == $conditionId) ]
-          | sort_by(.acceptedAt // "",.capturedAt // "",.reportId) | last // null),
+          | sort_by(.acceptedAt // "",.acceptanceSequence // 0,.reportId) | last // null),
         nextSequence:(([ $records[] | .condition.creationSequence? | numbers ] | max // 0) + 1),
         readCount:($read | length)
       }
@@ -182,7 +226,9 @@ project_condition_packet() {  # <report-path> <mission-id> <condition-id> <lifec
         }
       end')
   fi
-  [ "$updated" = "$report" ] || fm_eng_atomic_write "$path" "$updated"
+  if [ "$updated" != "$report" ]; then
+    fm_eng_atomic_write "$path" "$updated" || updated=$report
+  fi
   printf '%s' "$updated"
 }
 
@@ -221,7 +267,9 @@ heal_condition_projection() {  # <report-path> <report-json>
           message:"The Captain Call is no longer actively held, so its packet can no longer be projected"
         }
       }')
-    [ "$updated" = "$report" ] || fm_eng_atomic_write "$path" "$updated"
+    if [ "$updated" != "$report" ]; then
+      fm_eng_atomic_write "$path" "$updated" || updated=$report
+    fi
     printf '%s' "$updated"
     return 0
   fi
@@ -240,7 +288,7 @@ accepted_report_response() {  # <report-json> <replayed>
 
 append_report() {  # <path-or-dash>
   local input report_id kind mission_id task_id crewmate request_digest path prior prior_digest mission correlation validation stored
-  local shapeup_submission condition_scan_result
+  local shapeup_submission condition_scan_result acceptance_sequence
   local condition_id condition_title condition_packet condition_revision condition_previous condition_sequence condition_lifecycle hold_id
   input=$(fm_eng_read_json "$1") || {
     case $? in
@@ -394,12 +442,32 @@ append_report() {  # <path-or-dash>
       {condition:.condition,correlation:.correlation,reportRevision:$reportRevision,missionRevision:$missionRevision}
     ')
     condition_revision=$(printf '%s' "$condition_packet" | fm_eng_digest)
-    hold_id="$mission_id-decision-$condition_id"
+    # fm-decision-hold.sh owns the <origin>-decision-<key> identity and returns
+    # the identity it actually held, so the stored holdId can never name a hold
+    # this home does not have.
+    if ! hold_id=$("$SCRIPT_DIR/fm-decision-hold.sh" hold "$mission_id" "$condition_id" \
+      --title "$condition_title" --reason "captain decision pending for $condition_id") \
+      || ! fm_eng_valid_identity "$hold_id"; then
+      report_error captain_call_unavailable "Consequential report could not enter the durable Captain Call lifecycle" \
+        "$input" "$request_digest" "$report_id"
+      return 2
+    fi
+    acceptance_sequence=$(next_acceptance_sequence) || {
+      fm_eng_fail "$SCHEMA" record_not_durable "The report acceptance order could not be recorded durably"
+      return 2
+    }
     stored=$(printf '%s' "$input" | jq -c \
       --arg sourceRevision "$request_digest" --arg acceptedAt "$NOW" \
       --arg holdId "$hold_id" --arg packetRevision "$condition_revision" \
-      --arg lifecycle "$condition_lifecycle" --argjson creationSequence "$condition_sequence" '
-      . + {sourceRevision:$sourceRevision,requestDigest:$sourceRevision,status:"accepted",acceptedAt:$acceptedAt}
+      --arg lifecycle "$condition_lifecycle" --argjson creationSequence "$condition_sequence" \
+      --argjson acceptanceSequence "$acceptance_sequence" '
+      . + {
+        sourceRevision:$sourceRevision,
+        requestDigest:$sourceRevision,
+        status:"accepted",
+        acceptedAt:$acceptedAt,
+        acceptanceSequence:$acceptanceSequence
+      }
       | .condition += {
           holdId:$holdId,
           packetRevision:$packetRevision,
@@ -407,21 +475,32 @@ append_report() {  # <path-or-dash>
           creationSequence:$creationSequence
         }
     ')
-    if ! "$SCRIPT_DIR/fm-decision-hold.sh" hold "$mission_id" "$condition_id" \
-      --title "$condition_title" --reason "captain decision pending for $condition_id" >/dev/null; then
-      report_error captain_call_unavailable "Consequential report could not enter the durable Captain Call lifecycle" \
-        "$input" "$request_digest" "$report_id"
+    fm_eng_atomic_write "$path" "$stored" || {
+      fm_eng_fail "$SCHEMA" record_not_durable "The accepted report could not be stored durably"
       return 2
-    fi
-    fm_eng_atomic_write "$path" "$stored"
+    }
     stored=$(project_condition_packet "$path" "$mission_id" "$condition_id" "$condition_lifecycle" "$stored")
     accepted_report_response "$stored" false
     return 0
   fi
-  stored=$(printf '%s' "$input" | jq -c --arg sourceRevision "$request_digest" --arg acceptedAt "$NOW" '
-    . + {sourceRevision:$sourceRevision,requestDigest:$sourceRevision,status:"accepted",acceptedAt:$acceptedAt}
+  acceptance_sequence=$(next_acceptance_sequence) || {
+    fm_eng_fail "$SCHEMA" record_not_durable "The report acceptance order could not be recorded durably"
+    return 2
+  }
+  stored=$(printf '%s' "$input" | jq -c --arg sourceRevision "$request_digest" --arg acceptedAt "$NOW" \
+    --argjson acceptanceSequence "$acceptance_sequence" '
+    . + {
+      sourceRevision:$sourceRevision,
+      requestDigest:$sourceRevision,
+      status:"accepted",
+      acceptedAt:$acceptedAt,
+      acceptanceSequence:$acceptanceSequence
+    }
   ')
-  fm_eng_atomic_write "$path" "$stored"
+  fm_eng_atomic_write "$path" "$stored" || {
+    fm_eng_fail "$SCHEMA" record_not_durable "The accepted report could not be stored durably"
+    return 2
+  }
   shapeup_submission=null
   if [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/shapeup-client.json" ]; then
     case "$kind" in

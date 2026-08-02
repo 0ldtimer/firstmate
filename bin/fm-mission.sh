@@ -101,21 +101,33 @@ accept_mission() {  # <path-or-dash>
       }
     }
   ')
-  fm_eng_atomic_write "$path" "$stored"
+  fm_eng_atomic_write "$path" "$stored" || {
+    fm_eng_fail "$SCHEMA" record_not_durable "The accepted mission could not be stored durably"
+    return 2
+  }
   jq -cn --arg schemaVersion "$SCHEMA" --argjson mission "$stored" \
     '{accepted:true,schemaVersion:$schemaVersion,replayed:false,mission:$mission}'
 }
 
-change_state() {  # <state> <mission-id> <flag> <value> <field>
+# Every identity this surface stores stays a privacy-safe slug, including the
+# replacement mission and deferring decision a state change binds itself to.
+change_state() {  # <state> <mission-id> <flag> <value> <field> <expected-flag>
   local state=$1 mission_id=$2 flag=$3 value=$4 field=$5 path current updated
   fm_eng_valid_identity "$mission_id" || { fm_eng_fail "$SCHEMA" malformed_identity "Invalid missionId"; return 2; }
   [ "$flag" = "$6" ] || { usage >&2; return 2; }
+  fm_eng_valid_identity "$value" || {
+    fm_eng_fail "$SCHEMA" malformed_identity "$flag must be a privacy-safe identity"
+    return 2
+  }
   path="$MISSIONS/$mission_id.json"
   [ -f "$path" ] || { fm_eng_fail "$SCHEMA" mission_not_found "Mission is not accepted"; return 2; }
   current=$(jq -c . "$path") || { fm_eng_fail "$SCHEMA" malformed_record "Mission record is unreadable"; return 2; }
   updated=$(printf '%s' "$current" | jq -c --arg state "$state" --arg field "$field" --arg value "$value" --arg at "$NOW" \
     '.state=$state | .[$field]=$value | .stateChangedAt=$at')
-  fm_eng_atomic_write "$path" "$updated"
+  fm_eng_atomic_write "$path" "$updated" || {
+    fm_eng_fail "$SCHEMA" record_not_durable "The mission state change could not be stored durably"
+    return 2
+  }
   jq -cn --arg schemaVersion "$SCHEMA" --argjson mission "$updated" \
     '{accepted:true,schemaVersion:$schemaVersion,mission:$mission}'
 }

@@ -139,25 +139,102 @@ printf '%s' "$conflict_accept" | jq -e '.error.code == "review_revision_conflict
   || fail "conflicting Build revisions must be typed, not a misleading stale packet: $conflict_accept"
 pass "one Build Review packet spans every active mission and refuses conflicting revisions"
 
+# A record that parses but violates the shape the projection derives from it is
+# isolated exactly like an unparseable one, so one hand-edited record cannot blank
+# every unrelated projection operation.
 jq -n '{
   schemaVersion:"fm-engineering-mission.v1",missionId:"mission-44",taskId:"task-44",crewmateId:"malcolm",
   state:"accepted",sourceRevision:"hand-edited",acceptedBuildRevision:"build-8:r7",
   evidenceRequirements:"automated-tests",allowedEvidenceRoots:[],
   correlation:{shapeUp:{cycleRef:"cycle-13",buildRef:"build-8",buildRevision:"build-8:r7",scopeRef:null}}
 }' > "$HOME_DIR/data/engineering/missions/mission-44.json"
-set +e
-uncomputable=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' |
-  FM_HOME="$HOME_DIR" "$PROJECTION" 2>/dev/null)
-status=$?
-set -e
-[ "$status" -ne 0 ] || fail "an uncomputable Build Review set must not look like a fresh snapshot"
-printf '%s' "$uncomputable" | jq -e '.accepted == false and .error.code == "projection_unavailable"' >/dev/null \
-  || fail "a failed Build Review computation must be typed unavailable, not an empty review set: $uncomputable"
-rm -f "$HOME_DIR/data/engineering/missions/mission-44.json"
-set +e
+jq -n '{
+  schemaVersion:"fm-engineering-report.v1",reportId:"report-shape-invalid",status:"accepted",
+  sourceRevision:"hand-edited",missionId:"mission-42",kind:"evidence",capturedAt:"2026-08-01T12:20:00Z",
+  correlation:"not-an-envelope",evidence:"not-an-object"
+}' > "$HOME_DIR/data/engineering/reports/report-shape-invalid.json"
+isolated=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' |
+  FM_HOME="$HOME_DIR" "$PROJECTION")
+printf '%s' "$isolated" | jq -e '
+  .accepted == true
+  and .snapshot.freshness == "fresh"
+  and ([.snapshot.invalidRecords[] | select(.error.code == "schema_invalid_record") | .recordId] | sort)
+    == ["mission-44","report-shape-invalid"]
+  and ([.snapshot.invalidRecords[] | select(.recordId == "mission-44") | .kind] | first) == "mission"
+  and ([.snapshot.missions[].missionId] | index("mission-44")) == null
+  and ([.snapshot.reports[].reportId] | index("report-shape-invalid")) == null
+  and ([.snapshot.buildReviews[0].missionSet[].missionId] | sort) == ["mission-42","mission-43"]
+' >/dev/null || fail "a schema-invalid record must be isolated in invalidRecords, not blank the projection: $isolated"
+rm -f "$HOME_DIR/data/engineering/missions/mission-44.json" \
+  "$HOME_DIR/data/engineering/reports/report-shape-invalid.json"
 recovered=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' |
   FM_HOME="$HOME_DIR" "$PROJECTION")
-set -e
-printf '%s' "$recovered" | jq -e '.accepted == true and (.snapshot.buildReviews | length) == 1' >/dev/null \
-  || fail "the projection must recover once the uncomputable record is gone: $recovered"
-pass "a Build Review set that cannot be computed degrades to a typed unavailable projection"
+printf '%s' "$recovered" | jq -e '
+  .accepted == true and (.snapshot.buildReviews | length) == 1 and (.snapshot.invalidRecords | length) == 0
+' >/dev/null || fail "the projection must return to a clean invalid set once the record is gone: $recovered"
+pass "a schema-invalid stored record stays visible and non-executable without blanking the projection"
+
+# Acceptance order is FirstMate's, so two reports accepted inside the same second
+# must be ordered by FirstMate's own sequence and never by a crewmate's capture
+# time, however far in the future that capture time is dated.
+TIE_HOME="$TMP_ROOT/tie-home"
+TIE_WORKTREE="$TIE_HOME/projects/task-45"
+mkdir -p "$TIE_HOME/data" "$TIE_HOME/state" "$TIE_HOME/config" "$TIE_WORKTREE/evidence"
+printf 'verified\n' > "$TIE_WORKTREE/evidence/tests.txt"
+jq -n --arg root "$TIE_WORKTREE" '{
+  schemaVersion:"fm-engineering-mission.v1",missionId:"mission-45",taskId:"task-45",crewmateId:"nyota",
+  acceptedBuildRevision:"build-9:r1",evidenceRequirements:["automated-tests"],allowedEvidenceRoots:[$root],
+  correlation:{schemaVersion:"shapeup-correlation.v1",sourceRevision:"dispatch:r9",capturedAt:"2026-08-01T13:00:00Z",
+    identity:{kind:"command",id:"dispatch-45"},shapeUp:{cycleRef:"cycle-14",buildRef:"build-9",buildRevision:"build-9:r1",scopeRef:null},
+    firstMate:{missionId:"mission-45",taskId:"task-45",crewmateId:"nyota",session:null}}
+}' | FM_HOME="$TIE_HOME" "$MISSION" accept - >/dev/null
+
+tie_report() {  # <report-id> <kind> <captured-at>
+  jq -n --arg id "$1" --arg kind "$2" --arg at "$3" '{
+    schemaVersion:"fm-engineering-report.v1",reportId:$id,kind:$kind,capturedAt:$at,
+    missionId:"mission-45",taskId:"task-45",crewmateId:"nyota",
+    correlation:{schemaVersion:"shapeup-correlation.v1",sourceRevision:("event:"+$id),capturedAt:$at,
+      identity:{kind:"event",id:$id},shapeUp:{cycleRef:"cycle-14",buildRef:"build-9",buildRevision:"build-9:r1",scopeRef:null},
+      firstMate:{missionId:"mission-45",taskId:"task-45",crewmateId:"nyota",session:null}}
+  }'
+}
+
+tie_append() {  # <report-json>
+  printf '%s' "$1" | FM_HOME="$TIE_HOME" FM_ENGINEERING_NOW="2026-08-01T13:05:00Z" "$REPORT" append - >/dev/null
+}
+
+tie_evidence() {  # <report-id> <captured-at> <status>
+  tie_report "$1" evidence "$2" | jq --arg path "$TIE_WORKTREE/evidence/tests.txt" --arg status "$3" '
+    .evidence={producer:"nyota",verifier:"firstmate",contract:"automated-tests",executionRevision:("exec:"+$status),
+      reference:{kind:"file",value:$path,mediaType:"text/plain"},verification:{status:$status,instructions:"Run the suite."}}
+  '
+}
+
+tie_append "$(tie_evidence report-tie-evidence-future "2099-01-01T00:00:00Z" verified)"
+tie_append "$(tie_evidence report-tie-evidence-stale "2026-08-01T13:04:00Z" stale)"
+tie_append "$(tie_report report-tie-outcome outcome "2099-01-01T00:00:00Z" |
+  jq '.outcome={state:"completed",summary:"A forward-dated capture time must not pin readiness."}')"
+tie_append "$(tie_report report-tie-hill hill_judgment "2026-08-01T13:04:00Z" |
+  jq '.hill={phase:"uphill",judgment:"Execution reopened after the outcome was recorded.",movement:"backward"}')"
+
+tied=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' |
+  FM_HOME="$TIE_HOME" "$PROJECTION")
+printf '%s' "$tied" | jq -e '
+  (.snapshot.buildReviews | length) == 1
+  and .snapshot.buildReviews[0].missionSet[0].terminal == false
+  and .snapshot.buildReviews[0].missionSet[0].evidenceVerified == false
+  and .snapshot.buildReviews[0].ready == false
+  and ([.snapshot.reports[].acceptanceSequence] | unique | length) == 4
+' >/dev/null || fail "a crewmate capture time must not outrank FirstMate acceptance order: $tied"
+
+tie_append "$(tie_evidence report-tie-evidence-reverified "2026-08-01T13:04:00Z" verified)"
+tie_append "$(tie_report report-tie-outcome-final outcome "2026-08-01T13:04:00Z" |
+  jq '.outcome={state:"completed",summary:"The reopened execution finished."}')"
+settled=$(printf '%s' '{"schemaVersion":"fm-captains-log-projection.v1","operation":"snapshot"}' |
+  FM_HOME="$TIE_HOME" "$PROJECTION")
+printf '%s' "$settled" | jq -e '
+  .snapshot.buildReviews[0].missionSet[0].terminal == true
+  and .snapshot.buildReviews[0].missionSet[0].evidenceVerified == true
+  and .snapshot.buildReviews[0].ready == true
+' >/dev/null || fail "the last-accepted terminal outcome and verified evidence must decide readiness: $settled"
+pass "Review readiness follows FirstMate acceptance order, not crewmate capture time"

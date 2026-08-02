@@ -52,7 +52,14 @@ test_credential_material_is_detected() {
     '{"a":{"b":[{"Password":"hunter2"}]}}' \
     '{"note":"pushed with ghp_AAAAAAAAAAAAAAAAAAAA today"}' \
     '{"header":"Bearer abc.def"}' \
-    '{"key":"-----BEGIN RSA PRIVATE KEY-----"}'
+    '{"key":"-----BEGIN RSA PRIVATE KEY-----"}' \
+    '{"awsAccessKeyId":"AKIAEXAMPLEONLY"}' \
+    '{"apiKey":"value"}' \
+    '{"api_key":"value"}' \
+    '{"passwd":"value"}' \
+    '{"privateKey":"value"}' \
+    '{"summary":"the run exported SERVICE_TOKEN=fm_fake_value before failing"}' \
+    '{"summary":"the run exported api_key=fm_fake_value before failing"}'
   do
     fm_eng_contains_credentials "$case" || fail "credential material was not detected: $case"
   done
@@ -62,11 +69,36 @@ test_credential_material_is_detected() {
     '{"summary":"The suite passed."}' \
     '{"tokenCount":42,"secretsScanned":true,"credentials":null}' \
     '{"judgment":"We removed the password prompt from the flow."}' \
-    '{"reference":{"value":"https://example.test/report.json"}}'
+    '{"reference":{"value":"https://example.test/report.json"}}' \
+    '{"judgment":"Total tokens: 4821 in this run, so we split the Scope."}' \
+    '{"judgment":"We rotated the API key: ops will hand over the new one."}'
   do
     ! fm_eng_contains_credentials "$case" || fail "benign record was rejected as credential material: $case"
   done
   pass "fm_eng_contains_credentials keys on credential-shaped names and values only"
+}
+
+test_credential_vocabulary_is_shared() {
+  local ere regex name
+  ere=$(fm_eng_credential_name_ere)
+  regex=$(fm_eng_credential_name_regex)
+  # One vocabulary owns both forms, so pane redaction and record scanning cannot
+  # drift apart on which names carry secrets.
+  for name in token secret password passwd credential api key access private; do
+    case "$regex" in
+      *"$name"*) ;;
+      *) fail "the jq credential vocabulary lost $name: $regex" ;;
+    esac
+  done
+  for name in SERVICE_TOKEN aws_secret_access_key API-KEY passwd MyPassword; do
+    printf '%s=x\n' "$name" | LC_ALL=C grep -Eq "^($ere)=" \
+      || fail "the ERE credential vocabulary does not match $name: $ere"
+  done
+  for name in Authorization progress lifecycle; do
+    ! printf '%s=x\n' "$name" | LC_ALL=C grep -Eq "^($ere)=" \
+      || fail "the ERE credential vocabulary matched the benign name $name"
+  done
+  pass "fm_eng_credential_name_ere and fm_eng_credential_name_regex share one vocabulary"
 }
 
 test_reads_are_bounded_and_closed() {
@@ -126,7 +158,17 @@ test_writes_are_atomic_and_leave_no_residue() {
     || fail "atomic write left a temporary file behind: $(find "$TMP_ROOT/nested/deeper" -type f)"
   fm_eng_atomic_write "$path" '{"state":"superseded"}'
   jq -e '.state == "superseded"' "$path" >/dev/null || fail "atomic rewrite did not replace the record"
-  pass "fm_eng_atomic_write creates its parent and replaces records without residue"
+  # A store that cannot accept the record must say so: every caller publishes an
+  # outcome only after this returns success.
+  local status
+  set +e
+  fm_eng_atomic_write "$path/child.json" '{"state":"accepted"}' 2>/dev/null
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a write that cannot land must report failure"
+  [ "$(find "$TMP_ROOT/nested/deeper" -type f | wc -l | tr -d '[:space:]')" = 1 ] \
+    || fail "a failed atomic write left residue behind: $(find "$TMP_ROOT/nested/deeper" -type f)"
+  pass "fm_eng_atomic_write creates its parent, replaces records, and types its failures"
 }
 
 test_confinement_rejects_sibling_prefixes() {
@@ -195,6 +237,7 @@ test_failures_are_typed_json() {
 
 test_identities_stay_privacy_safe
 test_credential_material_is_detected
+test_credential_vocabulary_is_shared
 test_reads_are_bounded_and_closed
 test_canonical_form_is_revision_stable
 test_writes_are_atomic_and_leave_no_residue
