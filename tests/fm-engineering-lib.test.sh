@@ -247,10 +247,29 @@ test_lock_wait_deadline_scales_with_request() {
   fm_eng_lock_release_all
   # A budget that is actually enforced tracks the request instead of a fixed
   # multiple of it: a 6s wait must not finish inside a 1s wait's own ceiling.
+  # The requested interval is also a grace period the caller is owed in full, so a
+  # partly elapsed second of the whole-second clock must not cut it short.
+  [ "$short" -ge 1 ] || fail "a 1s contention bound gave up inside its own grace period"
   [ "$short" -le 3 ] || fail "a 1s contention bound took ${short}s"
-  [ "$long" -ge 5 ] || fail "a 6s contention bound gave up after ${long}s"
+  [ "$long" -ge 6 ] || fail "a 6s contention bound gave up after ${long}s"
   [ "$long" -le 9 ] || fail "a 6s contention bound ran ${long}s"
   pass "the contention bound tracks the requested seconds rather than a multiple of them"
+}
+
+test_lock_wait_default_bound_is_honoured() {
+  local held="$TMP_ROOT/default-deadline/lock" elapsed
+  fm_eng_lock_acquire "$held" 5 "2026-08-02T00:00:00Z" || fail "the default-wait fixture could not be set up"
+  elapsed=$(date +%s)
+  set +e
+  ( fm_eng_lock_acquire_wait "$held" 5 "2026-08-02T00:00:00Z" ) >/dev/null 2>&1
+  set -e
+  elapsed=$(( $(date +%s) - elapsed ))
+  fm_eng_lock_release_all
+  # The documented default is five seconds, and a caller that names no bound is
+  # owed the same grace period as one that does.
+  [ "$elapsed" -ge 5 ] || fail "the default contention bound gave up after ${elapsed}s"
+  [ "$elapsed" -le 8 ] || fail "the default contention bound ran ${elapsed}s"
+  pass "an unspecified contention bound honours the documented five-second default"
 }
 
 test_pause_probe_is_memoized_and_deferred() {
@@ -423,6 +442,7 @@ test_locks_are_liveness_safe
 test_locks_survive_paths_with_spaces
 test_lock_wait_fails_fast_on_permanent_failure
 test_lock_wait_deadline_scales_with_request
+test_lock_wait_default_bound_is_honoured
 test_pause_probe_is_memoized_and_deferred
 test_reads_are_bounded_and_closed
 test_canonical_form_is_revision_stable

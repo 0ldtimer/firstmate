@@ -317,6 +317,40 @@ refute_fragments "machine peek" "$secret_boundary" "$BOUNDARY_SECRET"
 refute_fragments "session inspection" "$secret_boundary_inspection" "$BOUNDARY_SECRET"
 pass "redacting one row keeps the unrelated pane-wide row above it on its own line"
 
+# The joined and per-row candidates can disagree because the per-row pass saw a
+# credential the rejoined line hides, not only the other way round. Whichever
+# candidate is published must never expose a value the other masked, so the same
+# rows must redact in either order.
+CANDIDATE_SECRET='hunt3'
+candidate_capture() {  # <file> <credential-row-position>
+  : > "$1"
+  if [ "$2" = middle ]; then
+    pane_row "$1" 39 'checking configuration values and other'
+    pane_row "$1" 39 "step 4 of 9 note now    password: $CANDIDATE_SECRET"
+    pane_row "$1" 18 ' more context here'
+  else
+    pane_row "$1" 39 'checking configuration values and other'
+    pane_row "$1" 18 ' more context here'
+    pane_row "$1" 39 "step 4 of 9 note now    password: $CANDIDATE_SECRET"
+  fi
+}
+
+for position in middle last; do
+  CANDIDATE_CAPTURE="$TMP_ROOT/candidate-$position-capture.txt"
+  candidate_capture "$CANDIDATE_CAPTURE" "$position"
+  candidate=$(peek_capture "$CANDIDATE_CAPTURE" 20)
+  candidate_inspection=$(inspect_capture "$CANDIDATE_CAPTURE" 20)
+  printf '%s' "$candidate" | jq -e '
+    .available == true and (.capture.text | contains("password: [REDACTED]"))
+  ' >/dev/null || fail "a short operand must be redacted with the credential row $position: $candidate"
+  case "$(printf '%s' "$candidate" | jq -r '.capture.text')" in
+    *"$CANDIDATE_SECRET"*) fail "the published candidate released a value the other candidate masked: $candidate" ;;
+  esac
+  refute_fragments "machine peek" "$candidate" "$CANDIDATE_SECRET"
+  refute_fragments "session inspection" "$candidate_inspection" "$CANDIDATE_SECRET"
+done
+pass "a value either candidate masks is never released by the one that gets published"
+
 # A two-column glyph makes a row occupy the whole pane while counting fewer
 # codepoints than a plain row beside it, so the wrap must not be recognized by
 # a measured width that a wide glyph can hide.

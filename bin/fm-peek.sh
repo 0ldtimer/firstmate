@@ -65,13 +65,16 @@ valid_target_id() {
 # columns - reach the widest row's guaranteed width, itself a lower bound on the
 # pane width because each non-ASCII codepoint may instead occupy none. Both
 # bounds err toward stitching, so a wide glyph cannot hide the wrap.
-# Stitching is speculative, so every logical line is offered to the rules twice:
-# once joined and once as the rows the pane actually printed. When redacting the
-# rows one at a time produces exactly what redacting the joined line produced, no
-# redaction depended on the stitch and the rows are handed back with their own
-# boundaries; only a redaction that straddles a wrap keeps the joined line. That
-# way a row which merely fills the pane keeps its own line and its own event even
-# when the row beside it carries a credential of its own.
+# Stitching is speculative, so the rules run over the rows the pane actually
+# printed first, and the joined candidate is then built from those already-redacted
+# rows and offered to the rules again. The joined candidate therefore carries every
+# redaction the rows carry plus any that only a rejoined wrap reveals, so choosing
+# it can never release a value the rows had already masked. When the rows rejoin to
+# exactly the joined candidate nothing depended on the stitch and the rows are
+# handed back with their own boundaries, so a row which merely fills the pane keeps
+# its own line and its own event even when the row beside it carries a credential
+# of its own; only a redaction that a wrap hid from the per-row pass costs the
+# boundary.
 redact_capture() {
   local names labels anchor quotes
   names=$(fm_eng_credential_name_ere)
@@ -97,7 +100,7 @@ redact_capture() {
       if (cells - wide > floor) floor = cells - wide
     }
     END {
-      logical = ""; rows = 0; open = 0
+      rows = 0; open = 0
       for (i = 1; i <= NR; i++) {
         row = line[i]
         if (!open) { carried = pending; pending = 0; open = 1 }
@@ -106,16 +109,12 @@ redact_capture() {
         dangling = (separated || contiguous)
         stitch = (i < NR && floor > 0 && reach[i] >= floor)
         if (stitch && separated) row = row " "
-        logical = logical row
         row_text[++rows] = row
         if (stitch) continue
-        if (carried) {
-          logical = claim(logical)
-          row_text[1] = claim(row_text[1])
-        }
-        print "J\t" logical
+        if (carried) row_text[1] = claim(row_text[1])
+        print "G\t" (carried ? 1 : 0)
         for (r = 1; r <= rows; r++) print "R\t" row_text[r]
-        logical = ""; rows = 0; open = 0
+        rows = 0; open = 0
         pending = dangling
       }
     }
@@ -127,9 +126,49 @@ redact_capture() {
     -e "s/(^|$anchor)($labels$quotes)[[:space:]]*:[[:space:]]*${quotes}[^[:space:]]+\$/\\1\\2: [REDACTED]/" \
     -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
   | LC_ALL=C awk '
-    # Each logical line arrives as its joined form followed by the rows the pane
-    # printed, both already redacted. The rules cannot match across the one-letter
-    # tag, so the two forms agreeing means no redaction needed the stitch.
+    # The redacted rows of each logical line rejoin into the joined candidate, so
+    # that candidate starts from every redaction the per-row pass already made and
+    # the rules only have to add what a rejoined wrap reveals. The rules cannot
+    # match across the one-letter tag, so the tag is safe to carry through them.
+    function claim(text,   indent) {
+      indent = ""
+      if (match(text, /^[ \t]+/)) { indent = substr(text, 1, RLENGTH); text = substr(text, RLENGTH + 1) }
+      sub(/^[^ \t]+/, "[REDACTED]", text)
+      return indent text
+    }
+    function emit(   r, joined) {
+      if (!open) return
+      joined = ""
+      for (r = 1; r <= rows; r++) joined = joined row_text[r]
+      if (carried) joined = claim(joined)
+      print "J\t" joined
+      for (r = 1; r <= rows; r++) print "R\t" row_text[r]
+      open = 0; rows = 0
+    }
+    {
+      cut = index($0, "\t")
+      text = substr($0, cut + 1)
+      if (substr($0, 1, cut - 1) == "G") {
+        emit()
+        carried = (text == "1")
+        open = 1
+      } else {
+        row_text[++rows] = text
+      }
+    }
+    END { emit() }
+  ' | LC_ALL=C sed -E \
+    -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/g' \
+    -e 's/(gh[pousr]_)[A-Za-z0-9_]+/\1[REDACTED]/g' \
+    -e "s/($names)=[^[:space:]]+/\\1=[REDACTED]/g" \
+    -e "s/(^|$anchor)($labels$quotes)[[:space:]]*:[[:space:]]*${quotes}[^[:space:]]{6,}/\\1\\2: [REDACTED]/g" \
+    -e "s/(^|$anchor)($labels$quotes)[[:space:]]*:[[:space:]]*${quotes}[^[:space:]]+\$/\\1\\2: [REDACTED]/" \
+    -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
+  | LC_ALL=C awk '
+    # The joined candidate is a superset of the rows it was built from, so when the
+    # rows rejoin to something else the difference is a redaction only the rejoined
+    # wrap revealed and the joined form is the safe answer. Otherwise nothing
+    # depended on the stitch and the pane rows keep their own boundaries.
     function settle(   r, joined_rows) {
       if (!open) return
       joined_rows = ""

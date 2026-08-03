@@ -112,6 +112,7 @@ Acceptance order is a monotonic `acceptanceSequence` FirstMate assigns as it acc
 The sequence is allocated under the same liveness-safe mutex the Captain intent path uses, so concurrent appends into one home cannot be handed the same number, and a store that cannot be read in full is a typed `record_not_durable` refusal rather than an order that repeats.
 That mutex distinguishes contention from a store that can never hold a lock: contention is waited out against a wall-clock deadline, while an un-creatable lock directory is refused at once rather than after the whole wait, and the Captain intent path reports the two as `intent_busy` and `intent_lock_unavailable`.
 The deadline is the caller's whole budget, so the probe, reclaim, and process-spawn cost of retrying comes out of it rather than extending it, and an uncontended acquisition neither pauses nor probes.
+The requested interval is a grace period the caller is owed in full rather than a ceiling, so a wait carries the request plus at most one second of the whole-second clock it reads, and the default is five seconds.
 
 Superseded missions retain history outside the active set, and deferred missions require a revision-bound Captain decision.
 
@@ -133,8 +134,9 @@ The two separators carry different evidence, so they are matched differently: `=
 A colon label must be one the credential word ends - anything may be glued in front of it, so `apitoken` and `dbpassword` qualify, and only separator-delimited components may follow it, so the inert plural `tokens` does not - and it may be quoted or bracketed the way a pane echoing JSON or a config fragment writes it.
 Its operand must then give one of two independent signals: it closes the line, the way a credential header's value does, or it is long enough to be a secret wherever it sits.
 That redacts a short value such as `Password: hunt3` and a mid-line one such as `api_key: sk_live_… (rotated)`, while inert telemetry such as `Total tokens: 4821 in this run` gives neither signal and renders as the pane printed it, and a pane-wide inert label is never read as a dangling introducer that would stitch away the next row's event.
-Because stitching is speculative, every logical line is redacted twice - once joined and once as the rows the pane printed - and the rows are handed back with their own boundaries whenever redacting them separately produces exactly what redacting the joined line produced.
-A row that merely fills the pane without wrapping therefore keeps its own line even when the row beside it carries a credential of its own, so unrelated events are never merged into one; only a redaction that straddles a wrap keeps the joined line.
+Because stitching is speculative, the rules run over the rows the pane printed first, and the joined candidate is then built from those already-redacted rows and offered to the rules again.
+The joined candidate therefore carries every redaction the rows carry plus any that only a rejoined wrap reveals, so whichever candidate is published can never release a value the other had already masked.
+The rows are handed back with their own boundaries whenever they rejoin to exactly the joined candidate, so a row that merely fills the pane without wrapping keeps its own line even when the row beside it carries a credential of its own and unrelated events are never merged into one; only a redaction that a wrap hid from the per-row pass costs the boundary.
 
 The operation never attaches an input-capable terminal client and never returns command text, arbitrary arguments, or unrestricted environment values.
 

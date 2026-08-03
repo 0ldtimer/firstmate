@@ -295,6 +295,10 @@ fm_eng_lock_pause_unit() {
 # serializes, and the owner probe that reclaims a crashed holder runs about once a
 # second instead of on every retry. A store that can never hold the lock is not
 # contention and is refused at once rather than after the whole wait.
+# The clock this reads counts whole seconds, so the deadline carries one extra
+# second: the requested interval is a grace period the caller is owed in full
+# rather than a ceiling a partly elapsed second can cut short, and the overshoot
+# that buys stays under one second.
 fm_eng_lock_acquire_wait() {  # <lock-dir> <stale-minutes> <recorded-at> [seconds]
   local dir=$1 stale=${2:-} at=${3:-} seconds=${4:-5} deadline probes=0 reclaim_every status
   case "$seconds" in
@@ -311,7 +315,7 @@ fm_eng_lock_acquire_wait() {  # <lock-dir> <stale-minutes> <recorded-at> [second
   else
     reclaim_every=20
   fi
-  deadline=$(( $(date +%s) + seconds ))
+  deadline=$(( $(date +%s) + seconds + 1 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep "$FM_ENG_LOCK_PAUSE_UNIT"
     if mkdir "$dir" 2>/dev/null; then
