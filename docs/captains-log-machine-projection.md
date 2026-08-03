@@ -150,6 +150,7 @@ Run the focused portable suites with the following commands.
 
 ```text
 bash tests/fm-captains-log-projection.test.sh
+bash tests/fm-engineering-lib.test.sh
 bash tests/fm-mission-shapeup.test.sh
 bash tests/fm-report.test.sh
 bash tests/fm-shapeup-client.test.sh
