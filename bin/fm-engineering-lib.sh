@@ -245,12 +245,22 @@ fm_eng_lock_release() {  # <lock-dir>
   fm_eng_lock_remove "$1"
 }
 
+# Taking the lock and recording who holds it are one step, so the cheap retry path
+# registers ownership exactly the way the first attempt does.
+fm_eng_lock_record() {  # <lock-dir> <recorded-at>
+  local started
+  FM_ENG_LOCK_HELD_DIRS[${#FM_ENG_LOCK_HELD_DIRS[@]}]=$1
+  started=$(fm_eng_process_start_signature "$$") || started=unknown
+  printf 'host=%s\npid=%s\nstarted=%s\nacquiredAt=%s\n' \
+    "$FM_ENG_LOCK_HOST" "$$" "$started" "${2:-}" > "$1/owner" 2>/dev/null || true
+}
+
 # The mutex is a mkdir the filesystem serializes, and the owner record is what
 # makes reclaiming it safe rather than a blind timeout. Contention and a store that
 # cannot hold a lock at all are separate answers: status 1 means another owner has
 # it and waiting can help, status 2 means it can never be taken here.
 fm_eng_lock_acquire() {  # <lock-dir> <stale-minutes> <recorded-at>
-  local dir=$1 stale started
+  local dir=$1 stale
   stale=$(fm_eng_lock_stale_minutes "${2:-}")
   mkdir -p "$(dirname "$dir")" 2>/dev/null || return 2
   if ! mkdir "$dir" 2>/dev/null; then
@@ -260,52 +270,61 @@ fm_eng_lock_acquire() {  # <lock-dir> <stale-minutes> <recorded-at>
       return 1
     fi
   fi
-  FM_ENG_LOCK_HELD_DIRS[${#FM_ENG_LOCK_HELD_DIRS[@]}]=$dir
-  started=$(fm_eng_process_start_signature "$$") || started=unknown
-  printf 'host=%s\npid=%s\nstarted=%s\nacquiredAt=%s\n' \
-    "$FM_ENG_LOCK_HOST" "$$" "$started" "${3:-}" > "$dir/owner" 2>/dev/null || true
+  fm_eng_lock_record "$dir" "${3:-}"
 }
 
 FM_ENG_LOCK_PAUSE_UNIT=''
 
-# The wait is expressed in seconds, so the bound a caller asks for is the bound it
-# gets whether or not this host's sleep accepts a fraction.
+# The probe costs a real sleep, so it assigns the shared answer directly rather
+# than being read back through a command substitution that would discard it, and
+# it is only ever reached once a wait is already going to pause.
 fm_eng_lock_pause_unit() {
-  if [ -z "$FM_ENG_LOCK_PAUSE_UNIT" ]; then
-    if sleep 0.05 2>/dev/null; then
-      FM_ENG_LOCK_PAUSE_UNIT=0.05
-    else
-      FM_ENG_LOCK_PAUSE_UNIT=1
-    fi
+  [ -z "$FM_ENG_LOCK_PAUSE_UNIT" ] || return 0
+  if sleep 0.05 2>/dev/null; then
+    FM_ENG_LOCK_PAUSE_UNIT=0.05
+  else
+    FM_ENG_LOCK_PAUSE_UNIT=1
   fi
-  printf '%s' "$FM_ENG_LOCK_PAUSE_UNIT"
 }
 
 # Contending for a shared counter is normal rather than an error, so this waits a
-# bounded time instead of refusing. Every attempt goes through the reclaim path, so
-# a holder that crashed cannot wedge the wait. A store that can never hold the lock
-# is not contention and is refused at once rather than after the whole wait.
+# bounded time instead of refusing. The bound is a wall-clock deadline, so probe,
+# reclaim, and process-spawn cost all come out of the caller's budget rather than
+# extending it. An uncontended acquisition never pauses, never probes, and never
+# reads the clock. Once contended, retries are the bare mkdir the filesystem
+# serializes, and the owner probe that reclaims a crashed holder runs about once a
+# second instead of on every retry. A store that can never hold the lock is not
+# contention and is refused at once rather than after the whole wait.
 fm_eng_lock_acquire_wait() {  # <lock-dir> <stale-minutes> <recorded-at> [seconds]
-  local seconds=${4:-5} unit attempts index=0 status
+  local dir=$1 stale=${2:-} at=${3:-} seconds=${4:-5} deadline probes=0 reclaim_every status
   case "$seconds" in
     ''|*[!0-9]*|0) seconds=5 ;;
   esac
   [ "${#seconds}" -le 4 ] || seconds=5
-  unit=$(fm_eng_lock_pause_unit)
-  if [ "$unit" = 1 ]; then
-    attempts=$seconds
+  fm_eng_lock_acquire "$dir" "$stale" "$at"
+  status=$?
+  [ "$status" -eq 1 ] || return "$status"
+  stale=$(fm_eng_lock_stale_minutes "$stale")
+  fm_eng_lock_pause_unit
+  if [ "$FM_ENG_LOCK_PAUSE_UNIT" = 1 ]; then
+    reclaim_every=1
   else
-    attempts=$((seconds * 20))
+    reclaim_every=20
   fi
-  while :; do
-    fm_eng_lock_acquire "$1" "${2:-}" "${3:-}"
-    status=$?
-    [ "$status" -eq 0 ] && return 0
-    [ "$status" -eq 1 ] || return "$status"
-    index=$((index + 1))
-    [ "$index" -lt "$attempts" ] || return 1
-    sleep "$unit"
+  deadline=$(( $(date +%s) + seconds ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep "$FM_ENG_LOCK_PAUSE_UNIT"
+    if mkdir "$dir" 2>/dev/null; then
+      fm_eng_lock_record "$dir" "$at"
+      return 0
+    fi
+    probes=$((probes + 1))
+    if [ "$probes" -ge "$reclaim_every" ]; then
+      probes=0
+      fm_eng_lock_reclaim "$dir" "$stale"
+    fi
   done
+  return 1
 }
 
 fm_eng_validate_correlation() {  # <json> <mission> <task> <crewmate>

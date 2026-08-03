@@ -224,8 +224,60 @@ test_lock_wait_fails_fast_on_permanent_failure() {
   fm_eng_lock_release_all
   [ "$status" -ne 0 ] || fail "a lock held by a live owner must not be handed to a waiter"
   [ "$elapsed" -ge 1 ] || fail "contention must actually be waited out, not refused at once"
-  [ "$elapsed" -le 6 ] || fail "the contention wait ran ${elapsed}s past its 2s bound"
+  # The bound is a wall-clock deadline, so per-attempt probe and spawn cost has to
+  # come out of the requested budget rather than multiplying it. The ceiling leaves
+  # room for a loaded runner without tolerating a bound that scales with fork cost.
+  [ "$elapsed" -le 4 ] || fail "the contention wait ran ${elapsed}s past its 2s deadline"
   pass "fm_eng_lock_acquire_wait waits out contention and refuses a permanent failure at once"
+}
+
+test_lock_wait_deadline_scales_with_request() {
+  local held="$TMP_ROOT/deadline/lock" short long
+  fm_eng_lock_acquire "$held" 5 "2026-08-02T00:00:00Z" || fail "the deadline fixture could not be set up"
+  short=$(date +%s)
+  set +e
+  ( fm_eng_lock_acquire_wait "$held" 5 "2026-08-02T00:00:00Z" 1 ) >/dev/null 2>&1
+  set -e
+  short=$(( $(date +%s) - short ))
+  long=$(date +%s)
+  set +e
+  ( fm_eng_lock_acquire_wait "$held" 5 "2026-08-02T00:00:00Z" 6 ) >/dev/null 2>&1
+  set -e
+  long=$(( $(date +%s) - long ))
+  fm_eng_lock_release_all
+  # A budget that is actually enforced tracks the request instead of a fixed
+  # multiple of it: a 6s wait must not finish inside a 1s wait's own ceiling.
+  [ "$short" -le 3 ] || fail "a 1s contention bound took ${short}s"
+  [ "$long" -ge 5 ] || fail "a 6s contention bound gave up after ${long}s"
+  [ "$long" -le 9 ] || fail "a 6s contention bound ran ${long}s"
+  pass "the contention bound tracks the requested seconds rather than a multiple of them"
+}
+
+test_pause_probe_is_memoized_and_deferred() {
+  local free="$TMP_ROOT/deferred/lock" held="$TMP_ROOT/deferred/held"
+  FM_ENG_LOCK_PAUSE_UNIT=''
+  # An uncontended acquisition must never reach the probe: its cost is a real
+  # sleep, and paying it would tax every report append for an answer that only
+  # matters once a wait actually has to pause.
+  fm_eng_lock_acquire_wait "$free" 5 "2026-08-02T00:00:00Z" 5 \
+    || fail "an uncontended wait must acquire the lock"
+  [ -z "$FM_ENG_LOCK_PAUSE_UNIT" ] \
+    || fail "an uncontended wait probed the pause unit: $FM_ENG_LOCK_PAUSE_UNIT"
+  fm_eng_lock_release "$free"
+
+  fm_eng_lock_acquire "$held" 5 "2026-08-02T00:00:00Z" || fail "the probe fixture could not be set up"
+  set +e
+  ( fm_eng_lock_acquire_wait "$held" 5 "2026-08-02T00:00:00Z" 1 ) >/dev/null 2>&1
+  set -e
+  fm_eng_lock_release_all
+  # The probe answer has to land in the caller's own shell, or it is re-paid on
+  # every wait for a capability that cannot change.
+  fm_eng_lock_pause_unit
+  case "$FM_ENG_LOCK_PAUSE_UNIT" in
+    0.05|1) ;;
+    *) fail "the pause probe did not memoize a usable unit: $FM_ENG_LOCK_PAUSE_UNIT" ;;
+  esac
+  pass "the pause probe memoizes in the caller's shell and never runs for an uncontended wait"
 }
 
 test_reads_are_bounded_and_closed() {
@@ -370,6 +422,8 @@ test_credential_label_anchor_admits_delimiters
 test_locks_are_liveness_safe
 test_locks_survive_paths_with_spaces
 test_lock_wait_fails_fast_on_permanent_failure
+test_lock_wait_deadline_scales_with_request
+test_pause_probe_is_memoized_and_deferred
 test_reads_are_bounded_and_closed
 test_canonical_form_is_revision_stable
 test_writes_are_atomic_and_leave_no_residue

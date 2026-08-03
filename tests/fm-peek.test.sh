@@ -289,6 +289,34 @@ case "$(printf '%s' "$glued" | jq -r '.capture.text')" in
 esac
 pass "glued credential labels, short values, and quoted labels are all redacted"
 
+# Redacting one row must not cost the row above it its own event. A pane-wide inert
+# row followed by a credential-looking row is two events, whether the operand is a
+# short inert word or a genuine secret, because neither redaction depends on the
+# speculative stitch between them.
+BOUNDARY_CAPTURE="$TMP_ROOT/boundary-capture.txt"
+: > "$BOUNDARY_CAPTURE"
+pane_row "$BOUNDARY_CAPTURE" 39 'checking configuration values and other'
+pane_row "$BOUNDARY_CAPTURE" 15 'password: unset'
+boundary=$(peek_capture "$BOUNDARY_CAPTURE" 20)
+printf '%s' "$boundary" | jq -e '
+  .available == true
+  and .capture.text == "checking configuration values and other\npassword: [REDACTED]"
+' >/dev/null || fail "a short line-final operand must not merge the inert row above it: $boundary"
+
+SECRET_BOUNDARY_CAPTURE="$TMP_ROOT/boundary-secret-capture.txt"
+: > "$SECRET_BOUNDARY_CAPTURE"
+BOUNDARY_SECRET='fm_fake_realsecret1'
+pane_row "$SECRET_BOUNDARY_CAPTURE" 39 'checking configuration values and other'
+pane_row "$SECRET_BOUNDARY_CAPTURE" 29 "password: $BOUNDARY_SECRET"
+secret_boundary=$(peek_capture "$SECRET_BOUNDARY_CAPTURE" 20)
+secret_boundary_inspection=$(inspect_capture "$SECRET_BOUNDARY_CAPTURE" 20)
+printf '%s' "$secret_boundary" | jq -e '
+  .capture.text == "checking configuration values and other\npassword: [REDACTED]"
+' >/dev/null || fail "a genuine secret must be redacted in place without merging its neighbour: $secret_boundary"
+refute_fragments "machine peek" "$secret_boundary" "$BOUNDARY_SECRET"
+refute_fragments "session inspection" "$secret_boundary_inspection" "$BOUNDARY_SECRET"
+pass "redacting one row keeps the unrelated pane-wide row above it on its own line"
+
 # A two-column glyph makes a row occupy the whole pane while counting fewer
 # codepoints than a plain row beside it, so the wrap must not be recognized by
 # a measured width that a wide glyph can hide.

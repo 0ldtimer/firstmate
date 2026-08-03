@@ -64,9 +64,14 @@ valid_target_id() {
 # its codepoints plus its non-ASCII codepoints - each of which may occupy two
 # columns - reach the widest row's guaranteed width, itself a lower bound on the
 # pane width because each non-ASCII codepoint may instead occupy none. Both
-# bounds err toward stitching, so a wide glyph cannot hide the wrap. Stitched
-# rows are split apart again unless the rules actually redacted something, so an
-# unrelated row that merely fills the pane keeps its own line and its own event.
+# bounds err toward stitching, so a wide glyph cannot hide the wrap.
+# Stitching is speculative, so every logical line is offered to the rules twice:
+# once joined and once as the rows the pane actually printed. When redacting the
+# rows one at a time produces exactly what redacting the joined line produced, no
+# redaction depended on the stitch and the rows are handed back with their own
+# boundaries; only a redaction that straddles a wrap keeps the joined line. That
+# way a row which merely fills the pane keeps its own line and its own event even
+# when the row beside it carries a credential of its own.
 redact_capture() {
   local names labels anchor quotes
   names=$(fm_eng_credential_name_ere)
@@ -76,6 +81,14 @@ redact_capture() {
   LC_ALL=C awk -v names="$names" -v labels="$labels" -v anchor="$anchor" -v quotes="$quotes" '
     function codepoints(text,   rest) { rest = text; return length(text) - gsub(/[\200-\277]/, "", rest) }
     function multibyte(text,    rest) { rest = text; return gsub(/[\300-\377]/, "", rest) }
+    # A dangling introducer from the previous logical line claims the first token
+    # of this one, which is the wrapped value in full.
+    function claim(text,   indent) {
+      indent = ""
+      if (match(text, /^[ \t]+/)) { indent = substr(text, 1, RLENGTH); text = substr(text, RLENGTH + 1) }
+      sub(/^[^ \t]+/, "[REDACTED]", text)
+      return indent text
+    }
     {
       line[NR] = $0
       cells = codepoints($0)
@@ -84,7 +97,7 @@ redact_capture() {
       if (cells - wide > floor) floor = cells - wide
     }
     END {
-      logical = ""; spans = ""; open = 0
+      logical = ""; rows = 0; open = 0
       for (i = 1; i <= NR; i++) {
         row = line[i]
         if (!open) { carried = pending; pending = 0; open = 1 }
@@ -94,18 +107,15 @@ redact_capture() {
         stitch = (i < NR && floor > 0 && reach[i] >= floor)
         if (stitch && separated) row = row " "
         logical = logical row
-        spans = spans (spans == "" ? "" : ",") length(row)
+        row_text[++rows] = row
         if (stitch) continue
-        # A dangling introducer from the previous logical line claims the first
-        # token of this one, which is the wrapped value in full.
         if (carried) {
-          indent = ""
-          if (match(logical, /^[ \t]+/)) { indent = substr(logical, 1, RLENGTH); logical = substr(logical, RLENGTH + 1) }
-          sub(/^[^ \t]+/, "[REDACTED]", logical)
-          logical = indent logical
+          logical = claim(logical)
+          row_text[1] = claim(row_text[1])
         }
-        print spans "\t" logical
-        logical = ""; spans = ""; open = 0
+        print "J\t" logical
+        for (r = 1; r <= rows; r++) print "R\t" row_text[r]
+        logical = ""; rows = 0; open = 0
         pending = dangling
       }
     }
@@ -117,19 +127,32 @@ redact_capture() {
     -e "s/(^|$anchor)($labels$quotes)[[:space:]]*:[[:space:]]*${quotes}[^[:space:]]+\$/\\1\\2: [REDACTED]/" \
     -e 's/(-----BEGIN ([A-Z ]+)?PRIVATE KEY-----)/[REDACTED PRIVATE KEY]/g' \
   | LC_ALL=C awk '
-    # The leading span list records each stitched row width; the rules cannot
-    # match inside it, so a logical line the rules left byte-for-byte alone is
-    # handed back as the rows the pane actually printed.
+    # Each logical line arrives as its joined form followed by the rows the pane
+    # printed, both already redacted. The rules cannot match across the one-letter
+    # tag, so the two forms agreeing means no redaction needed the stitch.
+    function settle(   r, joined_rows) {
+      if (!open) return
+      joined_rows = ""
+      for (r = 1; r <= rows; r++) joined_rows = joined_rows row_text[r]
+      if (joined_rows == logical) {
+        for (r = 1; r <= rows; r++) print row_text[r]
+      } else {
+        print logical
+      }
+      open = 0; rows = 0
+    }
     {
       cut = index($0, "\t")
-      count = split(substr($0, 1, cut - 1), span, ",")
       text = substr($0, cut + 1)
-      total = 0
-      for (i = 1; i <= count; i++) total += span[i]
-      if (length(text) != total || index(text, "[REDACTED]") > 0) { print text; next }
-      at = 1
-      for (i = 1; i <= count; i++) { print substr(text, at, span[i]); at += span[i] }
+      if (substr($0, 1, cut - 1) == "J") {
+        settle()
+        logical = text
+        open = 1
+      } else {
+        row_text[++rows] = text
+      }
     }
+    END { settle() }
   '
 }
 
