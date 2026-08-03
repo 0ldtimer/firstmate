@@ -42,8 +42,16 @@ client_fail() {  # <code> <message> [detail-code]
   '
 }
 
+# GNU stat reads -f as a filesystem report that takes no format operand, so a
+# BSD-first `stat -f || stat -c` fallback prints a filesystem block on stdout
+# before failing over and pollutes the mode with it. Select the platform syntax,
+# exactly as bin/fm-pr-lib.sh and bin/fm-fleet-snapshot.sh already do.
 file_mode() {  # <path>
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%Lp' "$1" 2>/dev/null
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
 }
 
 load_config() {
