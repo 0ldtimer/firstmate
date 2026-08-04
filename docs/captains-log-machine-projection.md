@@ -158,3 +158,11 @@ bash tests/fm-decision-hold.test.sh
 bash tests/fm-build-review.test.sh
 bash tests/fm-peek.test.sh
 ```
+
+## Engineering Scotty fixture freeze
+
+The maintained fork consumes `engineering-scotty-fixtures.v1` from
+`contracts/fm-bridge/fixtures/engineering-scotty/`. Its byte-identical cross-repo
+digest is `2d026915d85e2217fd25dee7942a4f4621aa79ba552dfc8d400d39d6c34934eb`.
+Semantic changes require a protocol revision and a coordinated three-repository
+re-freeze.

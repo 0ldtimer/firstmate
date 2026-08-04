@@ -1,0 +1,11 @@
+{
+  "protocolRevision": "engineering-scotty.v1",
+  "kind": "execution-group-acceptance",
+  "executionId": "execution:cycle-13",
+  "attemptId": "attempt:cycle-13:1",
+  "binding": {"workspaceId": "workspace-13", "cycleId": "cycle-13", "buildId": "build-8"},
+  "manifestDigest": "sha256:manifest-build-8-v1",
+  "authorizationReceipt": "receipt:cycle-13:1",
+  "disposition": "accepted",
+  "replayDisposition": "new"
+}
