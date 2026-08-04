@@ -52,6 +52,14 @@ fm_cycle_delegate() {
     [ -f "$child_path" ] || fm_cycle_write "$child_path" "$(printf '%s' "$child" | jq -c --arg executionId "$id" '. + {executionId:$executionId,state:"queued",delegatedAt:(now|todateiso8601)}')" || { fm_cycle_fail durable_store "child could not be stored"; return 2; }
   done < <(printf '%s' "$group" | jq -c '.children[]?')
   jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="delegated" | .delegatedAt=$at' "$path" | { read -r updated; fm_cycle_write "$path" "$updated"; }
+  # Scotty remains the only fan-out owner. A durable wake tells the existing
+  # FirstMate primary liaison to drain this group; Captain's Log never spawns
+  # or steers a crewmate directly.
+  if [ -f "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh" ]; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
+    fm_wake_append signal "execution:$id" "Scotty delegation queued for execution group $id" >/dev/null 2>&1 || true
+  fi
   jq -cn --arg id "$id" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"delegateExecutionGroup",executionId:$id,state:"delegated"}'
 }
 
