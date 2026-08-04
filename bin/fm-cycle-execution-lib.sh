@@ -31,13 +31,13 @@ fm_cycle_accept_group() {
   if [ -f "$path" ]; then
     prior=$(jq -c . "$path" 2>/dev/null) || { fm_cycle_fail malformed_record "stored group is unreadable"; return 2; }
     if [ "$(printf '%s' "$prior" | jq -r '.manifestDigest // empty')" != "$(printf '%s' "$input" | jq -r '.manifestDigest')" ]; then fm_cycle_fail identity_conflict "execution identity is bound to another manifest"; return 2; fi
-    jq -cn --argjson group "$prior" --arg digest "$digest" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acceptExecutionGroup",replayed:true,executionGroup:$group,receipt:{executionId:$group.executionId,manifestDigest:$group.manifestDigest,digest:$digest}}'; return 0
+    jq -cn --argjson group "$prior" --arg digest "$digest" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acceptExecutionGroup",replayed:true,executionGroup:$group,receipt:{executionId:$group.executionId,manifestDigest:$group.manifestDigest,digest:$digest,authorizationReceipt:("receipt:" + $group.executionId)}}'; return 0
   fi
   local stored
   stored=$(printf '%s' "$input" | jq -c --arg digest "$digest" '. + {state:"accepted",groupDigest:$digest,acceptedAt:(now|todateiso8601),leaseExpiresAt:((now + 86400)|todateiso8601),children:((.children // []) | map(. + {state:"queued"}))}') || { fm_cycle_fail malformed_group "cannot normalize execution group"; return 2; }
   fm_cycle_write "$path" "$stored" || { fm_cycle_fail durable_store "execution group could not be stored"; return 2; }
   printf '%s' "$stored" | jq -c '.children[]? | . + {executionId: input_filename}' >/dev/null 2>&1 || true
-  jq -cn --argjson group "$stored" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acceptExecutionGroup",replayed:false,executionGroup:$group,receipt:{executionId:$group.executionId,manifestDigest:$group.manifestDigest}}'
+  jq -cn --argjson group "$stored" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acceptExecutionGroup",replayed:false,executionGroup:$group,receipt:{executionId:$group.executionId,manifestDigest:$group.manifestDigest,authorizationReceipt:("receipt:" + $group.executionId)}}'
 }
 
 fm_cycle_status() { local id=$1 path="$FM_CYCLE_GROUPS/$1.json"; [ -f "$path" ] || { fm_cycle_fail not_found "execution group not found"; return 2; }; jq -c '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"executionGroupStatus",executionGroup:.}' "$path"; }
