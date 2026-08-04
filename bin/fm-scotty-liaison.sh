@@ -75,8 +75,10 @@ validate_child_binding() {
   [ -z "$expected_root" ] || [ "$expected_root" = "$root" ] || { fail "repository root binding mismatch for $project"; return 1; }
   base=$(printf '%s' "$child" | jq -r '.baseRevision // .repository.baseRevision // empty')
   case "$base" in ''|*[!A-Fa-f0-9]*) fail "child has no valid base revision: $project"; return 1;; esac
+  [ "${#base}" -eq 40 ] || { fail "child base revision must be a full commit id: $project"; return 1; }
   git -C "$root" cat-file -e "$base^{commit}" 2>/dev/null || { fail "bound base revision is unavailable: $project"; return 1; }
   [ "$(git -C "$root" rev-parse HEAD 2>/dev/null)" = "$(git -C "$root" rev-parse "$base^{commit}" 2>/dev/null)" ] || { fail "project is not at its bound base revision: $project"; return 1; }
+  printf '%s' "$child" | jq -e '(.repository.allowedRemotes // []) | type == "array" and all(.[]; type == "string")' >/dev/null 2>&1 || { fail "child allowed remotes must be a string array: $project"; return 1; }
   allowed=$(printf '%s' "$child" | jq -r '.repository.allowedRemotes[]? // empty' 2>/dev/null || true)
   if [ -n "$allowed" ]; then
     remote=$(git -C "$root" remote get-url origin 2>/dev/null || true)
