@@ -156,6 +156,7 @@ process_group() {
   while IFS= read -r child; do
     child_id=$(printf '%s' "$child" | jq -r '.childId // .workItemId // .taskId // empty')
     task=$(printf '%s' "$child" | jq -r '.taskId // .childId // .workItemId // empty')
+    fm_cycle_identity "$child_id" || { fail "child has invalid identity in execution group $id"; result=1; continue; }
     child_file="$FM_CYCLE_CHILDREN/$child_id.json"
     [ -f "$child_file" ] || fm_cycle_write "$child_file" "$(printf '%s' "$child" | jq -c --arg executionId "$id" '. + {executionId:$executionId,state:"queued"}')" || { result=1; continue; }
     child=$(cat "$child_file") || { result=1; continue; }
