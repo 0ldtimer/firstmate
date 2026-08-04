@@ -31,6 +31,7 @@ FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$PRO
 
 [ "$(wc -l < "$HOME_DIR/state/spawn.log" | tr -d ' ')" = 1 ] || { echo 'expected one FirstMate spawn' >&2; exit 1; }
 jq -e '.state == "delegated" and .taskId == "task-build"' "$HOME_DIR/data/engineering/execution/children/child-build.json" >/dev/null
+jq -e '.owner == "firstmate-primary-liaison" and .state == "delegated"' "$HOME_DIR/data/engineering/execution/liaison/primary-backlog/child-build.json" >/dev/null
 [ ! -s "$HOME_DIR/state/.wake-queue" ] || { echo 'Scotty wake was not consumed' >&2; exit 1; }
 FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$PROJECTS" FM_SCOTTY_SPAWN_BIN="$SPAWN" "$ROOT/bin/fm-scotty-liaison.sh" --once >/dev/null
 [ "$(wc -l < "$HOME_DIR/state/spawn.log" | tr -d ' ')" = 1 ] || { echo 'restart replay spawned a duplicate' >&2; exit 1; }
