@@ -145,7 +145,7 @@ fm_cycle_emit_intent() {
   local input=$1 id path existing digest
   fm_cycle_init || { fm_cycle_fail durable_store "execution store unavailable"; return 2; }
   id=$(printf '%s' "$input" | jq -r '.intentId // empty'); fm_cycle_identity "$id" || { fm_cycle_fail malformed_identity "intentId is invalid"; return 2; }
-  printf '%s' "$input" | jq -e '.schemaVersion == "fm-progress-intent.v1" and (.executionId|type=="string") and (.childId|type=="string") and (.kind|IN("task","hill","evidence")) and (.evidence.reference|type=="string" and length>0) and (if .kind == "hill" then (.target.position|type == "number" and .target.position >= 0 and .target.position <= 5) else true end) and (if .kind == "task" then (.target.taskId|type == "string" and length > 0) else true end)' >/dev/null 2>&1 || { fm_cycle_fail malformed_intent "typed intent is invalid"; return 2; }
+  printf '%s' "$input" | jq -e '.schemaVersion == "fm-progress-intent.v1" and ((.executionId | type) == "string") and ((.childId | type) == "string") and (.kind|IN("task","hill","evidence")) and (((.evidence.reference | type) == "string") and (.evidence.reference|length>0)) and (if .kind == "hill" then (((.target.position | type) == "number") and .target.position >= 0 and .target.position <= 5) else true end) and (if .kind == "task" then (((.target.taskId | type) == "string") and (.target.taskId|length > 0)) else true end)' >/dev/null 2>&1 || { fm_cycle_fail malformed_intent "typed intent is invalid"; return 2; }
   local group_path="$FM_CYCLE_GROUPS/$(printf '%s' "$input" | jq -r '.executionId').json"
   [ -f "$group_path" ] || { fm_cycle_fail execution_not_found "execution group is not accepted"; return 2; }
   printf '%s' "$input" | jq -r '.childId' | while IFS= read -r child_ref; do
