@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# FirstMate maintained machine boundary. One JSON request on stdin, one bounded
+# JSON response on stdout. Provider state is durable under FM_HOME/data.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-$FM_ROOT}"
+# shellcheck source=bin/fm-cycle-execution-lib.sh
+. "$SCRIPT_DIR/fm-cycle-execution-lib.sh"
+command -v jq >/dev/null 2>&1 || { printf '%s\n' '{"accepted":false,"error":{"code":"dependency_missing","message":"jq is required"}}'; exit 2; }
+
+request=$(head -c 1048577)
+[ "${#request}" -le 1048576 ] || { fm_cycle_fail request_too_large "request exceeds 1 MiB"; exit 2; }
+printf '%s' "$request" | jq -e 'type == "object"' >/dev/null 2>&1 || { fm_cycle_fail malformed_request "request must be a JSON object"; exit 2; }
+protocol=$(printf '%s' "$request" | jq -r '.protocolVersion // empty')
+operation=$(printf '%s' "$request" | jq -r '.operation // empty')
+case "$protocol:$operation" in
+  fm-bridge.v2:capabilities)
+    jq -cn '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"capabilities",capabilities:["cycle-execution.v1","execution-group.accept","execution-group.status","execution-group.delegate","progress.publish","progress.acknowledge","captains-log.projection"],firstMate:{home:env.FM_HOME}}' ;;
+  fm-bridge.v2:acceptExecutionGroup|fm-bridge.v2:createExecutionGroup)
+    fm_cycle_accept_group "$request" ;;
+  fm-bridge.v2:executionGroupStatus|fm-bridge.v2:getExecutionGroup)
+    fm_cycle_status "$(printf '%s' "$request" | jq -r '.executionId // empty')" ;;
+  fm-bridge.v2:delegateExecutionGroup|fm-bridge.v2:delegateChildren)
+    fm_cycle_delegate "$(printf '%s' "$request" | jq -r '.executionId // empty')" ;;
+  fm-bridge.v2:publishProgress|fm-bridge.v2:progressIntent)
+    fm_cycle_emit_intent "$(printf '%s' "$request" | jq -c '.intent // .')" ;;
+  fm-bridge.v2:acknowledgeProgress|fm-bridge.v2:ack)
+    fm_cycle_ack "$(printf '%s' "$request" | jq -r '.intentId // empty')" "$(printf '%s' "$request" | jq -r '.intentDigest // .digest // empty')" ;;
+  fm-bridge.v2:projection|fm-bridge.v2:captainsLogProjection|fm-bridge.v2:captainsLogProjectionSnapshot)
+    fm_cycle_projection ;;
+  fm-bridge.v1:snapshot)
+    if [ -x "$SCRIPT_DIR/fm-fleet-snapshot.sh" ]; then exec "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; else jq -cn '{protocolVersion:"fm-bridge.v1",freshness:"unavailable",tasks:[]}' ; fi ;;
+  *) fm_cycle_fail unsupported_operation "unsupported protocol or operation"; exit 2 ;;
+esac

@@ -1,0 +1,19 @@
+{
+  "protocolVersion": "fm-bridge.v2",
+  "schemaRevision": "cycle-execution.v1",
+  "operations": {
+    "capabilities": "read",
+    "acceptExecutionGroup": "durable",
+    "executionGroupStatus": "read",
+    "delegateExecutionGroup": "durable",
+    "publishProgress": "durable",
+    "acknowledgeProgress": "durable",
+    "captainsLogProjection": "read"
+  },
+  "authority": {
+    "firstMate": ["executionGroup", "children", "progressIntents", "acknowledgements"],
+    "shapeUp": ["cycle", "build", "scope", "task", "hill"],
+    "captainsLog": ["coordination", "projection"]
+  },
+  "upstreamAcceptanceRequired": false
+}
