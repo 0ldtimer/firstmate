@@ -34,7 +34,7 @@ fm_cycle_accept_group() {
     jq -cn --argjson group "$prior" --arg digest "$digest" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acceptExecutionGroup",replayed:true,executionGroup:$group,receipt:{executionId:$group.executionId,manifestDigest:$group.manifestDigest,digest:$digest}}'; return 0
   fi
   local stored
-  stored=$(printf '%s' "$input" | jq -c --arg digest "$digest" '. + {state:"accepted",groupDigest:$digest,acceptedAt:(now|todateiso8601),children:((.children // []) | map(. + {state:"queued"}))}') || { fm_cycle_fail malformed_group "cannot normalize execution group"; return 2; }
+  stored=$(printf '%s' "$input" | jq -c --arg digest "$digest" '. + {state:"accepted",groupDigest:$digest,acceptedAt:(now|todateiso8601),leaseExpiresAt:((now + 86400)|todateiso8601),children:((.children // []) | map(. + {state:"queued"}))}') || { fm_cycle_fail malformed_group "cannot normalize execution group"; return 2; }
   fm_cycle_write "$path" "$stored" || { fm_cycle_fail durable_store "execution group could not be stored"; return 2; }
   printf '%s' "$stored" | jq -c '.children[]? | . + {executionId: input_filename}' >/dev/null 2>&1 || true
   jq -cn --argjson group "$stored" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acceptExecutionGroup",replayed:false,executionGroup:$group,receipt:{executionId:$group.executionId,manifestDigest:$group.manifestDigest}}'
@@ -46,6 +46,9 @@ fm_cycle_delegate() {
   local id=$1 path="$FM_CYCLE_GROUPS/$1.json" group child child_id child_path
   [ -f "$path" ] || { fm_cycle_fail not_found "execution group not found"; return 2; }
   group=$(jq -c . "$path") || { fm_cycle_fail malformed_record "execution group unreadable"; return 2; }
+  if jq -e '.leaseExpiresAt? and ((.leaseExpiresAt|fromdateiso8601) <= now)' "$path" >/dev/null 2>&1; then
+    fm_cycle_fail lease_expired "delegation lease has expired"; return 2
+  fi
   while IFS= read -r child; do
     child_id=$(printf '%s' "$child" | jq -r '.childId // .workItemId // empty'); fm_cycle_identity "$child_id" || continue
     child_path="$FM_CYCLE_CHILDREN/$child_id.json"
