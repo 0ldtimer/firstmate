@@ -16,13 +16,17 @@ protocol=$(printf '%s' "$request" | jq -r '.protocolVersion // empty')
 operation=$(printf '%s' "$request" | jq -r '.operation // empty')
 case "$protocol:$operation" in
   fm-bridge.v2:capabilities)
-    jq -cn '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"capabilities",capabilities:["cycle-execution.v1","execution-group.accept","execution-group.status","execution-group.delegate","progress.publish","progress.acknowledge","captains-log.projection"],firstMate:{home:env.FM_HOME}}' ;;
+    jq -cn '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"capabilities",capabilities:["cycle-execution.v1","execution-group.accept","execution-group.status","execution-group.delegate","execution-group.amend","execution-group.renew","progress.publish","progress.acknowledge","captains-log.projection"],firstMate:{home:env.FM_HOME}}' ;;
   fm-bridge.v2:acceptExecutionGroup|fm-bridge.v2:createExecutionGroup)
     fm_cycle_accept_group "$request" ;;
   fm-bridge.v2:executionGroupStatus|fm-bridge.v2:getExecutionGroup)
     fm_cycle_status "$(printf '%s' "$request" | jq -r '.executionId // empty')" ;;
   fm-bridge.v2:delegateExecutionGroup|fm-bridge.v2:delegateChildren)
     fm_cycle_delegate "$(printf '%s' "$request" | jq -r '.executionId // empty')" ;;
+  fm-bridge.v2:renewExecutionLease|fm-bridge.v2:renewLease)
+    fm_cycle_renew "$request" ;;
+  fm-bridge.v2:amendExecutionGroup|fm-bridge.v2:amendExecution)
+    fm_cycle_amend "$request" ;;
   fm-bridge.v2:publishProgress|fm-bridge.v2:progressIntent)
     fm_cycle_emit_intent "$(printf '%s' "$request" | jq -c '.intent // .')" ;;
   fm-bridge.v2:acknowledgeProgress|fm-bridge.v2:ack)

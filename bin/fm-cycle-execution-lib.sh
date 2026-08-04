@@ -10,13 +10,19 @@ FM_CYCLE_CHILDREN="$FM_CYCLE_ROOT/children"
 FM_CYCLE_INTENTS="$FM_CYCLE_ROOT/intents"
 FM_CYCLE_ACKS="$FM_CYCLE_ROOT/acks"
 FM_CYCLE_OUTBOX="$FM_CYCLE_ROOT/outbox"
+FM_CYCLE_LIAISON="$FM_CYCLE_ROOT/liaison"
 
-fm_cycle_init() { mkdir -p "$FM_CYCLE_GROUPS" "$FM_CYCLE_CHILDREN" "$FM_CYCLE_INTENTS" "$FM_CYCLE_ACKS" "$FM_CYCLE_OUTBOX"; }
+fm_cycle_init() { mkdir -p "$FM_CYCLE_GROUPS" "$FM_CYCLE_CHILDREN" "$FM_CYCLE_INTENTS" "$FM_CYCLE_ACKS" "$FM_CYCLE_OUTBOX" "$FM_CYCLE_LIAISON"; }
 fm_cycle_digest() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'; else sha256sum | awk '{print $1}'; fi; }
 fm_cycle_identity() { case "$1" in ''|*[!A-Za-z0-9._:-]*) return 1;; esac; [ "${#1}" -le 160 ]; }
 fm_cycle_json() { jq -ce 'type == "object"' 2>/dev/null; }
 fm_cycle_fail() { jq -cn --arg code "$1" --arg message "$2" '{accepted:false,protocolVersion:"fm-bridge.v2",schemaVersion:"cycle-execution.v1",error:{code:$code,message:$message}}'; }
-fm_cycle_write() { local path=$1 value=$2 tmp="${path}.$$"; mkdir -p "$(dirname "$path")" || return 1; printf '%s\n' "$value" > "$tmp" && mv "$tmp" "$path"; }
+fm_cycle_write() {
+  local path value tmp
+  path=$1; value=$2; tmp="${path}.$$"
+  mkdir -p "$(dirname "$path")" || return 1
+  printf '%s\n' "$value" > "$tmp" && mv "$tmp" "$path"
+}
 fm_cycle_canonical_digest() { jq -cS . | fm_cycle_digest; }
 
 fm_cycle_accept_group() {
@@ -64,6 +70,75 @@ fm_cycle_delegate() {
     fm_wake_append signal "execution:$id" "Scotty delegation queued for execution group $id" >/dev/null 2>&1 || true
   fi
   jq -cn --arg id "$id" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"delegateExecutionGroup",executionId:$id,state:"delegated"}'
+}
+
+# Renew the FirstMate-owned fan-out lease from a current producer cursor.  The
+# cursor is deliberately opaque to FirstMate: Captain's Log obtains it from
+# Shape Up and this boundary only records that a fresh, non-empty cursor was
+# presented.  Renewal is bounded to 24 hours and never revives a cycle marked
+# ended/quiesced/cancelled.
+fm_cycle_renew() {
+  local input=$1 id path group cursor now expires cycle_end
+  id=$(printf '%s' "$input" | jq -r '.executionId // empty')
+  cursor=$(printf '%s' "$input" | jq -r '.executionChangeCursor // .shapeUp.executionChangeCursor // empty')
+  fm_cycle_identity "$id" || { fm_cycle_fail malformed_identity "executionId is invalid"; return 2; }
+  [ -n "$cursor" ] || { fm_cycle_fail malformed_renewal "current execution-change cursor is required"; return 2; }
+  path="$FM_CYCLE_GROUPS/$id.json"
+  [ -f "$path" ] || { fm_cycle_fail not_found "execution group not found"; return 2; }
+  group=$(jq -c . "$path") || { fm_cycle_fail malformed_record "execution group unreadable"; return 2; }
+  jq -e '.state | IN("quiesced","cancelled","ended") | not' "$path" >/dev/null 2>&1 || { fm_cycle_fail lease_quiesced "execution group is not accepting new delegation"; return 2; }
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  expires=$(date -u -v+24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+24 hours' +%Y-%m-%dT%H:%M:%SZ)
+  cycle_end=$(printf '%s' "$group" | jq -r '.binding.cycleEndsAt // empty')
+  if [ -n "$cycle_end" ] && [[ "$cycle_end" < "$expires" ]]; then expires=$cycle_end; fi
+  jq -c --arg now "$now" --arg expires "$expires" --arg cursor "$cursor" \
+    '.leaseExpiresAt=$expires | .leaseRenewedAt=$now | .executionChangeCursor=$cursor | .leaseState="active" | (if .state == "lease_expired" then .state="delegated" else . end)' "$path" \
+    | { read -r updated; fm_cycle_write "$path" "$updated"; }
+  jq -cn --arg id "$id" --arg expires "$expires" --arg cursor "$cursor" \
+    '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"renewExecutionLease",executionId:$id,leaseExpiresAt:$expires,executionChangeCursor:$cursor}'
+}
+
+# Ordered amendment is intentionally small here: Captain's Log remains the
+# producer of the amendment digest and parent receipt.  FirstMate records the
+# immutable amendment and queues newly eligible children; removals become
+# paused records and are never torn down automatically.
+fm_cycle_amend() {
+  local input=$1 id path group parent sequence digest amendment amendment_path child child_id child_path
+  id=$(printf '%s' "$input" | jq -r '.executionId // empty')
+  parent=$(printf '%s' "$input" | jq -r '.parentGroupDigest // .parentDigest // empty')
+  sequence=$(printf '%s' "$input" | jq -r '.amendmentSequence // empty')
+  fm_cycle_identity "$id" || { fm_cycle_fail malformed_identity "executionId is invalid"; return 2; }
+  case "$sequence" in ''|*[!0-9]*) fm_cycle_fail malformed_amendment "amendmentSequence is required"; return 2;; esac
+  [ -n "$parent" ] || { fm_cycle_fail malformed_amendment "parent group digest is required"; return 2; }
+  path="$FM_CYCLE_GROUPS/$id.json"; [ -f "$path" ] || { fm_cycle_fail not_found "execution group not found"; return 2; }
+  group=$(jq -c . "$path") || { fm_cycle_fail malformed_record "execution group unreadable"; return 2; }
+  [ "$(printf '%s' "$group" | jq -r '.groupDigest // empty')" = "$parent" ] || { fm_cycle_fail parent_digest_mismatch "amendment parent does not match execution group"; return 2; }
+  if jq -e '.leaseExpiresAt? and ((.leaseExpiresAt|fromdateiso8601) <= now)' "$path" >/dev/null 2>&1; then
+    fm_cycle_fail lease_expired "delegation lease has expired"; return 2
+  fi
+  amendment=$(printf '%s' "$input" | jq -c --arg digest "$(printf '%s' "$input" | fm_cycle_canonical_digest)" '. + {state:"accepted",amendmentDigest:$digest,acceptedAt:(now|todateiso8601)}') || { fm_cycle_fail malformed_amendment "amendment is invalid"; return 2; }
+  fm_cycle_init || { fm_cycle_fail durable_store "execution store unavailable"; return 2; }
+  amendment_path="$FM_CYCLE_LIAISON/amendments/$id.$sequence.json"
+  if [ -f "$amendment_path" ]; then jq -cn --argjson amendment "$(cat "$amendment_path")" '{accepted:true,replayed:true,amendment:$amendment}'; return 0; fi
+  fm_cycle_write "$amendment_path" "$amendment" || { fm_cycle_fail durable_store "amendment could not be stored"; return 2; }
+  while IFS= read -r child; do
+    child_id=$(printf '%s' "$child" | jq -r '.childId // .workItemId // empty'); fm_cycle_identity "$child_id" || continue
+    child_path="$FM_CYCLE_CHILDREN/$child_id.json"
+    if [ -f "$child_path" ]; then jq -c '.state="paused" | .pauseReason="removed_by_amendment"' "$child_path" | { read -r updated; fm_cycle_write "$child_path" "$updated"; }; fi
+  done < <(printf '%s' "$input" | jq -c '.removedChildren[]?')
+  while IFS= read -r child; do
+    child_id=$(printf '%s' "$child" | jq -r '.childId // .workItemId // empty'); fm_cycle_identity "$child_id" || continue
+    child_path="$FM_CYCLE_CHILDREN/$child_id.json"
+    [ -f "$child_path" ] || fm_cycle_write "$child_path" "$(printf '%s' "$child" | jq -c --arg executionId "$id" --arg seq "$sequence" '. + {executionId:$executionId,amendmentSequence:($seq|tonumber),state:"queued"}')" || { fm_cycle_fail durable_store "amended child could not be stored"; return 2; }
+  done < <(printf '%s' "$input" | jq -c '.addedChildren[]?')
+  jq -c --argjson amendment "$amendment" --arg seq "$sequence" \
+    '.amendmentSequence=($seq|tonumber) | .amendments=((.amendments // []) + [$amendment])' "$path" \
+    | { read -r updated; fm_cycle_write "$path" "$updated"; } || { fm_cycle_fail durable_store "amendment index could not be stored"; return 2; }
+  if [ -f "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh" ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
+    fm_wake_append signal "execution:$id" "Scotty amendment queued for execution group $id" >/dev/null 2>&1 || true
+  fi
+  jq -cn --argjson amendment "$amendment" '{accepted:true,replayed:false,amendment:$amendment}'
 }
 
 fm_cycle_emit_intent() {
