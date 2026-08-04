@@ -10,7 +10,8 @@ FirstMate's durable execution store; Captain's Log never invokes `fm-spawn.sh`.
 Scotty fan-out is owned by the FirstMate primary liaison at
 `bin/fm-scotty-liaison.sh`. The liaison consumes the durable execution
 notification, records a `fm-scotty-delegation-transition.v1` transition before
-the first provider call, validates each child against the trusted
+the first provider call, places each descriptor in the durable
+`liaison/primary-backlog/` ingress, validates each child against the trusted
 `data/projects.md` registry, canonical non-symlink project root, repository
 remote policy, and exact bound base commit, then invokes the existing
 `bin/fm-spawn.sh` boundary. Captain's Log never invokes `fm-spawn.sh` and a
