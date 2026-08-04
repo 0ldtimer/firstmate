@@ -96,7 +96,7 @@ mark_child() {
 }
 
 dispatch_child() {
-  local execution=$1 child_file=$2 child project task child_key mode yolo harness model effort backend out err rc
+  local execution=$1 child_file=$2 child project task child_key mode yolo harness model effort backend out err rc backlog
   child=$(cat "$child_file") || return 1
   project=$(printf '%s' "$child" | jq -r '.project // .repository.project // empty')
   child_key=$(printf '%s' "$child" | jq -r '.childId // .workItemId // .taskId // empty')
@@ -111,6 +111,14 @@ dispatch_child() {
   case "$mode" in no-mistakes|direct-PR|local-only) ;; *) fail "child $task has no explicit delivery mode"; return 1;; esac
   case "$yolo" in on|off) ;; *) fail "child $task has invalid yolo posture"; return 1;; esac
   validate_child_binding "$child" || return 1
+  # The primary-liaison ingress is itself durable.  This record is the
+  # FirstMate backlog handoff consumed by the supervision cycle; it separates
+  # wake consumption from provider resolution and survives a primary restart.
+  backlog="$FM_CYCLE_LIAISON/primary-backlog/$child_key.json"
+  if [ ! -f "$backlog" ]; then
+    fm_cycle_write "$backlog" "$(printf '%s' "$child" | jq -c --arg executionId "$execution" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '. + {executionId:$executionId,state:"queued",queuedAt:$at,owner:"firstmate-primary-liaison"}')" || return 1
+  fi
   mark_child "$child_key" dispatching || return 1
   out="$FM_CYCLE_LIAISON/$task.stdout"; err="$FM_CYCLE_LIAISON/$task.stderr"
   local -a args=("$task" "$PROJECTS/$project" --mode "$mode" --yolo "$yolo")
@@ -125,6 +133,7 @@ dispatch_child() {
   set -e
   if [ "$rc" -eq 0 ]; then
     mark_child "$child_key" delegated || return 1
+    jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="delegated" | .delegatedAt=$at' "$backlog" > "$backlog.tmp.$(fm_current_pid)" && mv "$backlog.tmp.$(fm_current_pid)" "$backlog"
     jq -c --arg task "$task" --arg execution "$execution" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg output "$(cat "$out" 2>/dev/null || true)" \
       '. + {executionId:$execution,taskId:$task,state:"delegated",delegatedAt:$at,spawnOutput:$output}' "$child_file" > "$child_file.tmp.$(fm_current_pid)" && mv "$child_file.tmp.$(fm_current_pid)" "$child_file"
     return 0
