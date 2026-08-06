@@ -23,6 +23,20 @@ fm_cycle_write() {
   mkdir -p "$(dirname "$path")" || return 1
   printf '%s\n' "$value" > "$tmp" && mv "$tmp" "$path"
 }
+
+# Captain's Log consumes the negotiated projection envelope: capabilities and
+# snapshot are separate validated responses inside one bridge result.
+fm_cycle_projection() {
+  local captured_at source_revision
+  fm_cycle_init || return 1
+  captured_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  source_revision=$(for f in "$FM_CYCLE_GROUPS"/*.json "$FM_CYCLE_CHILDREN"/*.json "$FM_CYCLE_INTENTS"/*.json; do [ -f "$f" ] && cat "$f"; done | fm_cycle_digest)
+  jq -cn --arg capturedAt "$captured_at" --arg sourceRevision "fm-execution:$source_revision" \
+    --slurpfile groups <(for f in "$FM_CYCLE_GROUPS"/*.json; do [ -f "$f" ] && cat "$f"; done) \
+    --slurpfile children <(for f in "$FM_CYCLE_CHILDREN"/*.json; do [ -f "$f" ] && cat "$f"; done) \
+    --slurpfile intents <(for f in "$FM_CYCLE_INTENTS"/*.json; do [ -f "$f" ] && cat "$f"; done) \
+    '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"captainsLogProjection",capabilities:{accepted:true,schemaVersion:"fm-captains-log-projection.v1",operation:"capabilities",capabilities:{core:"available",shapeUp:{status:"negotiated",required:false},sessionInspection:{status:"negotiated",required:false,mode:"bounded-read-only",preferredBackend:"herdr"}},acceptedIntents:["acknowledgeCondition","acceptBuildReview","resolveCondition"]},snapshot:{accepted:true,schemaVersion:"fm-captains-log-projection.v1",operation:"snapshot",snapshot:{schemaVersion:"fm-captains-log-snapshot.v1",sourceRevision:$sourceRevision,capturedAt:$capturedAt,freshness:"fresh",reports:[],evidence:[],conditions:[],buildReviews:[],invalidRecords:[],missions:[],executionGroups:$groups,children:$children,progressIntents:$intents,pendingIntents:[$intents[]|select(.state=="pending")]}}}'
+}
 fm_cycle_canonical_digest() { jq -cS . | fm_cycle_digest; }
 
 fm_cycle_accept_group() {
@@ -161,7 +175,7 @@ fm_cycle_emit_intent() {
 
 fm_cycle_ack() { local id=$1 digest=$2 path="$FM_CYCLE_INTENTS/$1.json"; [ -f "$path" ] || { fm_cycle_fail not_found "intent not found"; return 2; }; [ "$(jq -r '.intentDigest' "$path")" = "$digest" ] || { fm_cycle_fail acknowledgement_mismatch "intent digest does not match"; return 2; }; jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="applied" | .acknowledgedAt=$at' "$path" | { read -r updated; fm_cycle_write "$path" "$updated"; rm -f "$FM_CYCLE_OUTBOX/$id.json"; }; jq -cn --arg id "$id" --arg digest "$digest" '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"acknowledgeProgress",intentId:$id,intentDigest:$digest,state:"applied"}'; }
 
-fm_cycle_projection() {
+fm_cycle_projection_legacy() {
   local captured_at source_revision
   fm_cycle_init || return 1
   captured_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
