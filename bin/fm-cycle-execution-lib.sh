@@ -168,5 +168,5 @@ fm_cycle_projection() {
     --slurpfile groups <(for f in "$FM_CYCLE_GROUPS"/*.json; do [ -f "$f" ] && cat "$f"; done) \
     --slurpfile children <(for f in "$FM_CYCLE_CHILDREN"/*.json; do [ -f "$f" ] && cat "$f"; done) \
     --slurpfile intents <(for f in "$FM_CYCLE_INTENTS"/*.json; do [ -f "$f" ] && cat "$f"; done) \
-    '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"captainsLogProjection",schemaVersion:"fm-captains-log-projection.v1",sourceRevision:$sourceRevision,capturedAt:$capturedAt,freshness:"fresh",executionGroups:$groups,children:$children,progressIntents:$intents,pendingIntents:[$intents[]|select(.state=="pending")]}'
+    '{accepted:true,protocolVersion:"fm-bridge.v2",operation:"captainsLogProjection",schemaVersion:"fm-captains-log-projection.v1",sourceRevision:$sourceRevision,capturedAt:$capturedAt,freshness:"fresh",capabilities:{core:"available",shapeUp:{status:"negotiated",required:false},sessionInspection:{status:"negotiated",required:false,mode:"bounded-read-only",preferredBackend:"herdr"}},acceptedIntents:["acknowledgeCondition","acceptBuildReview","resolveCondition"],executionGroups:$groups,children:$children,progressIntents:$intents,pendingIntents:[$intents[]|select(.state=="pending")]}'
 }
