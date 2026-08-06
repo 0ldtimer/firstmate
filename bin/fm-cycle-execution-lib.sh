@@ -131,8 +131,10 @@ fm_cycle_amend() {
     child_path="$FM_CYCLE_CHILDREN/$child_id.json"
     [ -f "$child_path" ] || fm_cycle_write "$child_path" "$(printf '%s' "$child" | jq -c --arg executionId "$id" --arg seq "$sequence" '. + {executionId:$executionId,amendmentSequence:($seq|tonumber),state:"queued"}')" || { fm_cycle_fail durable_store "amended child could not be stored"; return 2; }
   done < <(printf '%s' "$input" | jq -c '.addedChildren[]?')
-  jq -c --argjson amendment "$amendment" --arg seq "$sequence" \
-    '.amendmentSequence=($seq|tonumber) | .amendments=((.amendments // []) + [$amendment])' "$path" \
+  local added_children
+  added_children=$(printf '%s' "$input" | jq -c '.addedChildren // []')
+  jq -c --argjson amendment "$amendment" --argjson added "$added_children" --arg seq "$sequence" \
+    '.amendmentSequence=($seq|tonumber) | .amendments=((.amendments // []) + [$amendment]) | .children=((.children // []) + $added)' "$path" \
     | { read -r updated; fm_cycle_write "$path" "$updated"; } || { fm_cycle_fail durable_store "amendment index could not be stored"; return 2; }
   if [ -f "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh" ]; then
     . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
