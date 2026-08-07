@@ -273,6 +273,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/residual-review-findings/codex-bridge-protocol.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },

@@ -2,8 +2,10 @@
 # Shared session-lock harness identity.
 #
 # ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
-# bin/fm-lock.sh uses it to acquire and inspect state/.lock;
+# lock, and does the current process descend from that same harness?" decision,
+# and of the Codex token/launcher-pid answer to the same question for sessions
+# with no usable ancestry. bin/fm-lock.sh uses it to acquire and inspect
+# state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
@@ -138,16 +140,82 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# --- Codex launcher ownership -------------------------------------------------
+# A sandboxed Codex session cannot be identified by process ancestry at all: the
+# tool calls it runs are not descendants of the interactive session, and the one
+# process that lives as long as the session is the bin/fm-primary-codex.sh
+# launcher, which is a shell rather than a verified harness and so is never part
+# of a harness ancestry run. That session proves ownership with a capability
+# instead - the 128-bit FM_CODEX_SESSION_TOKEN recorded in state/.lock-token,
+# beside the launcher pid in state/.lock. bin/fm-primary-codex.sh owns both
+# variables; every consumer of ownership goes through the predicates below so
+# the token contract has exactly one implementation.
+
+# True when this process carries a well-formed Codex session token.
+fm_codex_token_valid() {
+  case "${FM_CODEX_SESSION_TOKEN:-}" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#FM_CODEX_SESSION_TOKEN}" -eq 32 ]
+}
+
+# Print this session's Codex launcher pid, or return 1 when it is not a pid.
+fm_codex_owner_pid() {
+  case "${FM_HARNESS_OWNER_PID:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$FM_HARNESS_OWNER_PID" -gt 1 ] || return 1
+  printf '%s\n' "$FM_HARNESS_OWNER_PID"
+}
+
+# True when pid $1 is still a live Codex launcher rather than merely a live pid.
+#
+# A bare `kill -0` cannot tell the recorded launcher from an unrelated process
+# that inherited its pid after a session died without releasing, and that
+# mistake is unrecoverable: only the original token may release, so every later
+# session would be refused the lock forever. Process arguments settle it when
+# they are readable. A sandbox that hides them cannot DISPROVE liveness, so a
+# live but unreadable pid stays live - the token design exists precisely because
+# process visibility is not guaranteed.
+fm_codex_launcher_alive() {  # <pid>
+  local pid=$1 args
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" -gt 1 ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 0
+  [ -n "$args" ] || return 0
+  case "$args" in
+    *fm-primary-codex*) return 0 ;;
+  esac
+  return 1
+}
+
+# True when the session lock in state dir $1 is held by THIS Codex session: the
+# recorded token is the one this process carries and the recorded pid is its own
+# launcher. Both halves are required so a token leaked into another session's
+# environment still cannot claim ownership of that session's lock.
+fm_codex_session_owns_lock() {  # <state-dir>
+  local state=$1 me
+  fm_codex_token_valid || return 1
+  me=$(fm_codex_owner_pid) || return 1
+  [ -f "$state/.lock-token" ] && [ ! -L "$state/.lock-token" ] || return 1
+  [ "$(cat "$state/.lock-token" 2>/dev/null)" = "$FM_CODEX_SESSION_TOKEN" ] || return 1
+  [ "$(cat "$state/.lock" 2>/dev/null)" = "$me" ]
+}
+
+# True when state dir $1 holds a session lock owned by the current session:
+# either this Codex session's token owns it, or its pid is ANY harness ancestor
+# of the current process. Membership is the honest test of the ancestry case,
+# because the lock owner sits at an unknown depth in a contiguous Claude run - it
+# is the outermost pid when the hook fires inside the session's own nested worker
+# chain, and an inner pid when a harness-named daemon parents the session. A
+# missing lock, a malformed lock, a lock held by a harness outside this ancestry,
+# or an ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids pid
+  fm_codex_session_owns_lock "$state" && return 0
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
