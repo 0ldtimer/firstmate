@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "shapeup-correlation.v1",
+  "sourceRevision": "fm:mission-42:r7",
+  "capturedAt": "2026-08-01T12:00:00Z",
+  "identity": {
+    "kind": "event",
+    "id": "event-42"
+  },
+  "shapeUp": {
+    "cycleRef": "cycle-13",
+    "buildRef": "build-8",
+    "scopeRef": "scope-context"
+  },
+  "firstMate": {
+    "missionId": "mission-42",
+    "taskId": "task-42",
+    "crewmateId": "keiko",
+    "session": {
+      "backend": "herdr",
+      "targetId": "pane-42",
+      "lifecycle": "running"
+    }
+  }
+}

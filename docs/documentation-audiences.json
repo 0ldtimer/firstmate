@@ -217,6 +217,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captains-log-machine-projection.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -282,6 +286,10 @@
     },
     {
       "path": "docs/sessionstart-nudge.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/shapeup-client.md",
       "audience": "operator-current"
     },
     {

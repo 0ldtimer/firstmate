@@ -1,0 +1,7 @@
+{
+  "protocolRevision": "engineering-scotty.v1",
+  "fixtureSetRevision": "engineering-scotty-fixtures.v1",
+  "fixtures": ["execution-group-acceptance.v1.json", "progress-acknowledgement.v1.json", "progress-intent.v1.json", "project-binding.v1.json"],
+  "identityRules": {"execution": "stable-per-cycle", "attempt": "new-per-retry", "intent": "stable-per-effect", "changedContent": "conflict"},
+  "authority": {"shapeUp": ["cycle", "build", "scope", "hill"], "firstMate": ["execution-group", "task", "crewmate", "evidence", "progress"], "captainsLog": ["projection", "recovery", "captains-log-entry"]}
+}
