@@ -7,6 +7,7 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export FM_HOME="${FM_HOME:-$FM_ROOT}"
+export CODEX_SHELL=1
 export FM_HARNESS_OWNER_PID=$$
 export FM_CODEX_SESSION_TOKEN
 if ! FM_CODEX_SESSION_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') \
