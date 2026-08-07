@@ -6,6 +6,8 @@
     "acceptExecutionGroup": "durable",
     "executionGroupStatus": "read",
     "delegateExecutionGroup": "durable",
+    "renewExecutionLease": "durable",
+    "amendExecutionGroup": "durable",
     "publishProgress": "durable",
     "acknowledgeProgress": "durable",
     "captainsLogProjection": "read"

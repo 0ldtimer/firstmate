@@ -47,11 +47,14 @@ take_execution_wakes() {
   printf '%s\n' "$rows"
 }
 
+# The dispatch mutex is the fleet's liveness-safe lock, not a bare exclusive
+# file: a liaison killed mid-dispatch leaves an owner record whose dead pid the
+# next run reclaims, so fan-out recovers instead of wedging on liaison_busy.
 claim_liaison_lock() {
   mkdir -p "$FM_CYCLE_LIAISON" || return 1
-  ( set -C; : > "$FM_LIAISON_LOCK" ) 2>/dev/null
+  fm_lock_try_acquire "$FM_LIAISON_LOCK"
 }
-release_liaison_lock() { rm -f "$FM_LIAISON_LOCK" 2>/dev/null || true; }
+release_liaison_lock() { fm_lock_release "$FM_LIAISON_LOCK" 2>/dev/null || true; }
 
 registry_has_project() {
   local project=$1 count
@@ -88,15 +91,16 @@ validate_child_binding() {
 }
 
 mark_child() {
-  local path="$FM_CYCLE_CHILDREN/$1.json" state=$2 reason=${3:-} tmp
+  local state=$2 reason=${3:-} path
+  path=$(fm_cycle_child_path "$1") || return 1
   [ -f "$path" ] || return 1
-  tmp="$path.tmp.$(fm_current_pid)"
-  jq -c --arg state "$state" --arg reason "$reason" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.state=$state | .updatedAt=$at | (if $reason == "" then del(.dispatchError) else .dispatchError=$reason end)' "$path" > "$tmp" && mv "$tmp" "$path"
+  # shellcheck disable=SC2016 # jq owns every $ in this filter; the shell must not expand it.
+  fm_cycle_update "$path" --arg state "$state" --arg reason "$reason" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.state=$state | .updatedAt=$at | (if $reason == "" then del(.dispatchError) else .dispatchError=$reason end)'
 }
 
 dispatch_child() {
-  local execution=$1 child_file=$2 child project task child_key mode yolo harness model effort backend out err rc backlog
+  local execution=$1 child_file=$2 child project task child_key mode yolo harness model effort backend out err rc backlog errexit=0
   child=$(cat "$child_file") || return 1
   project=$(printf '%s' "$child" | jq -r '.project // .repository.project // empty')
   child_key=$(printf '%s' "$child" | jq -r '.childId // .workItemId // .taskId // empty')
@@ -107,7 +111,8 @@ dispatch_child() {
   model=$(printf '%s' "$child" | jq -r '.dispatch.model // empty')
   effort=$(printf '%s' "$child" | jq -r '.dispatch.effort // empty')
   backend=$(printf '%s' "$child" | jq -r '.dispatch.backend // empty')
-  case "$task" in ''|*[!A-Za-z0-9._:-]*) fail "child has invalid task identity"; return 1;; esac
+  fm_cycle_identity "$task" || { fail "child has invalid task identity"; return 1; }
+  fm_cycle_identity "$child_key" || { fail "child $task has invalid child identity"; return 1; }
   case "$mode" in no-mistakes|direct-PR|local-only) ;; *) fail "child $task has no explicit delivery mode"; return 1;; esac
   case "$yolo" in on|off) ;; *) fail "child $task has invalid yolo posture"; return 1;; esac
   validate_child_binding "$child" || return 1
@@ -126,16 +131,19 @@ dispatch_child() {
   [ -n "$model" ] && args+=(--model "$model")
   [ -n "$effort" ] && args+=(--effort "$effort")
   [ -n "$backend" ] && args+=(--backend "$backend")
+  case $- in *e*) errexit=1 ;; esac
   set +e
   FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
     "$FM_SPAWN_BIN" "${args[@]}" >"$out" 2>"$err"
   rc=$?
-  set -e
+  if [ "$errexit" -eq 1 ]; then set -e; fi
   if [ "$rc" -eq 0 ]; then
     mark_child "$child_key" delegated || return 1
-    jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="delegated" | .delegatedAt=$at' "$backlog" > "$backlog.tmp.$(fm_current_pid)" && mv "$backlog.tmp.$(fm_current_pid)" "$backlog"
-    jq -c --arg task "$task" --arg execution "$execution" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg output "$(cat "$out" 2>/dev/null || true)" \
-      '. + {executionId:$execution,taskId:$task,state:"delegated",delegatedAt:$at,spawnOutput:$output}' "$child_file" > "$child_file.tmp.$(fm_current_pid)" && mv "$child_file.tmp.$(fm_current_pid)" "$child_file"
+    # shellcheck disable=SC2016 # jq owns every $ in these filters; the shell must not expand them.
+    fm_cycle_update "$backlog" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="delegated" | .delegatedAt=$at' || return 1
+    # shellcheck disable=SC2016 # jq owns every $ in these filters; the shell must not expand them.
+    fm_cycle_update "$child_file" --arg task "$task" --arg execution "$execution" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg output "$(cat "$out" 2>/dev/null || true)" \
+      '. + {executionId:$execution,taskId:$task,state:"delegated",delegatedAt:$at,spawnOutput:$output}' || return 1
     return 0
   fi
   mark_child "$child_key" queued "spawn failed (exit $rc): $(tr '\n' ' ' < "$err" | cut -c1-500)" || true
@@ -143,7 +151,7 @@ dispatch_child() {
 }
 
 process_group() {
-  local group_file=$1 group id lease state child_file child task child_id result=0 now
+  local group_file=$1 group id lease state child_file child task child_id result=0
   group=$(cat "$group_file") || return 1
   id=$(printf '%s' "$group" | jq -r '.executionId // empty')
   state=$(printf '%s' "$group" | jq -r '.state // empty')
@@ -157,16 +165,14 @@ process_group() {
         '{schemaVersion:"fm-scotty-delegation-transition.v1",executionId:$executionId,owner:"firstmate-primary-liaison",state:"delegating",at:$at}')" || return 1
   fi
   lease=$(printf '%s' "$group" | jq -r '.leaseExpiresAt // empty')
-  now=$(date +%s)
-  if [ -n "$lease" ] && [ "$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$lease" +%s 2>/dev/null || date -d "$lease" +%s 2>/dev/null || echo 0)" -le "$now" ]; then
-    jq -c '.leaseState="expired" | .state="lease_expired"' "$group_file" > "$group_file.tmp.$(fm_current_pid)" && mv "$group_file.tmp.$(fm_current_pid)" "$group_file"
+  if fm_cycle_lease_expired "$lease"; then
+    fm_cycle_update "$group_file" '.leaseState="expired" | .state="lease_expired"' || return 1
     return 0
   fi
   while IFS= read -r child; do
     child_id=$(printf '%s' "$child" | jq -r '.childId // .workItemId // .taskId // empty')
     task=$(printf '%s' "$child" | jq -r '.taskId // .childId // .workItemId // empty')
-    fm_cycle_identity "$child_id" || { fail "child has invalid identity in execution group $id"; result=1; continue; }
-    child_file="$FM_CYCLE_CHILDREN/$child_id.json"
+    child_file=$(fm_cycle_child_path "$child_id") || { fail "child has invalid identity in execution group $id"; result=1; continue; }
     [ -f "$child_file" ] || fm_cycle_write "$child_file" "$(printf '%s' "$child" | jq -c --arg executionId "$id" '. + {executionId:$executionId,state:"queued"}')" || { result=1; continue; }
     child=$(cat "$child_file") || { result=1; continue; }
     case "$(printf '%s' "$child" | jq -r '.state // "queued"')" in
@@ -176,7 +182,7 @@ process_group() {
         mark_child "$child_id" queued "recovered after interrupted spawn" || { result=1; continue; } ;;
     esac
     dispatch_child "$id" "$child_file" || result=1
-  done < <(printf '%s' "$group" | jq -c '.children[]?')
+  done < <(printf '%s' "$group" | jq -c '.children[]? | select(type == "object")')
   if [ "$result" -eq 0 ]; then
     fm_cycle_write "$FM_CYCLE_LIAISON/transitions/$id.delegated.json" \
       "$(jq -cn --arg executionId "$id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

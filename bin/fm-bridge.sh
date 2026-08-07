@@ -23,12 +23,40 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 request=$(head -c 1048577)
+
+# A pre-dispatch refusal answers in the envelope the caller declared, so a v1
+# client keeps the bare fm-bridge.v1 error shape it was written against and only
+# a request that declares fm-bridge.v2 receives the v2 envelope. The declared
+# version is read from the parsed request when it parses, and from the raw bytes
+# when it does not, so an oversized or malformed v2 request is still answered in
+# v2's shape.
+bridge_declared_version() {
+  local declared
+  declared=$(printf '%s' "$request" | jq -r 'if type == "object" then (.protocolVersion // empty) else empty end' 2>/dev/null) || declared=
+  if [ -n "$declared" ]; then
+    printf '%s\n' "$declared"
+    return 0
+  fi
+  case "$request" in
+    *'"fm-bridge.v2"'*) printf '%s\n' 'fm-bridge.v2' ;;
+    *) printf '%s\n' '' ;;
+  esac
+}
+
+bridge_pre_dispatch_fail() { # <code> <message>
+  if [ "$(bridge_declared_version)" = "fm-bridge.v2" ]; then
+    fm_cycle_fail "$1" "$2"
+  else
+    fm_bridge_fail "$1" "$2"
+  fi
+}
+
 [ "${#request}" -le 1048576 ] || {
-  fm_cycle_fail request_too_large "request exceeds 1 MiB"
+  bridge_pre_dispatch_fail request_too_large "request exceeds 1 MiB"
   exit 2
 }
 printf '%s' "$request" | jq -e 'type == "object"' >/dev/null 2>&1 || {
-  fm_cycle_fail malformed_request "request must be a JSON object"
+  bridge_pre_dispatch_fail malformed_request "request must be a JSON object"
   exit 2
 }
 protocol=$(printf '%s' "$request" | jq -r '.protocolVersion // empty')
@@ -154,35 +182,47 @@ if [ "$protocol" = "fm-bridge.v1" ]; then
 fi
 
 [ "$protocol" = "fm-bridge.v2" ] || {
-  fm_cycle_fail unsupported_version "unsupported protocol version"
+  bridge_pre_dispatch_fail unsupported_version "unsupported protocol version"
   exit 2
 }
 
 case "$operation" in
   capabilities)
     version=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null || printf '%s' 'local-fork')
-    jq -cn --arg home "$FM_HOME" --arg executable "$SCRIPT_DIR/fm-bridge.sh" --arg version "$version" '{
+    # capabilityDigest is derived from the advertised capabilities object at
+    # response time, so an edit to that object cannot advertise a stale digest.
+    capabilities=$(jq -cn '{
+      missionRevision:"mission-contract.v2",
+      missionResultRevision:"mission-result.v2",
+      missionResultOperations:[],
+      evidenceContractRevisions:["evidence.v2"],
+      harnesses:["local"],
+      backends:["herdr"],
+      validationProfiles:["no_mistakes"],
+      evidenceKinds:["automated","visual"],
+      deliveryModes:["local-only"],
+      permissions:["repository-write"],
+      externalReferences:{shapeUp:{revision:"shapeup-correlation.v1",matching:"opaque-reference-only",required:["cycleRef","buildRef"]}},
+      learning:{supported:false,modes:[],skills:[],afterVerificationOnly:true,countsAsEvidence:false,allowedPath:"docs/solutions/"}
+    }') || {
+      fm_cycle_fail capabilities_unavailable "capabilities could not be composed"
+      exit 2
+    }
+    capability_digest=$(printf '%s' "$capabilities" | fm_cycle_canonical_digest) || {
+      fm_cycle_fail capabilities_unavailable "capability digest could not be derived"
+      exit 2
+    }
+    jq -cn --arg home "$FM_HOME" --arg executable "$SCRIPT_DIR/fm-bridge.sh" --arg version "$version" \
+      --arg capabilityDigest "$capability_digest" --argjson capabilities "$capabilities" '{
       accepted:true,
       protocolVersion:"fm-bridge.v2",
       operation:"capabilities",
       firstMate:{home:$home,executable:$executable,version:$version},
       effectiveProfile:{harness:"local",backend:"herdr",validationProfile:"no_mistakes",noMistakes:true,deliveryMode:"local-only"},
-      capabilityDigest:"545b6719953de01b2274c62bd990888299acf00440b78997158f08e2656bfa54",
+      capabilityDigest:$capabilityDigest,
+      capabilityDigestSource:"sha256:canonical(capabilities)",
       dispatchable:true,
-      capabilities:{
-        missionRevision:"mission-contract.v2",
-        missionResultRevision:"mission-result.v2",
-        missionResultOperations:[],
-        evidenceContractRevisions:["evidence.v2"],
-        harnesses:["local"],
-        backends:["herdr"],
-        validationProfiles:["no_mistakes"],
-        evidenceKinds:["automated","visual"],
-        deliveryModes:["local-only"],
-        permissions:["repository-write"],
-        externalReferences:{shapeUp:{revision:"shapeup-correlation.v1",matching:"opaque-reference-only",required:["cycleRef","buildRef"]}},
-        learning:{supported:false,modes:[],skills:[],afterVerificationOnly:true,countsAsEvidence:false,allowedPath:"docs/solutions/"}
-      }
+      capabilities:$capabilities
     }'
     ;;
   acceptExecutionGroup|createExecutionGroup)

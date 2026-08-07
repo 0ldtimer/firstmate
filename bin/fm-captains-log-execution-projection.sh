@@ -5,6 +5,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+# shellcheck source=bin/fm-cycle-execution-lib.sh
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-cycle-execution-lib.sh"
 case "${1:---json}" in
   --json) fm_cycle_projection ;;

@@ -16,6 +16,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-captains-log-projection.sh` | Publish the versioned bounded Captain's Log machine projection and accepted intents |
+| `fm-captains-log-execution-projection.sh` | Print the read-only Cycle execution projection envelope (groups, children, pending intents) |
+| `fm-cycle-execution-lib.sh`  | Durable Cycle execution-group boundary: identity-bound paths, leases, ordered amendments, and typed progress |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
