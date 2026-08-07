@@ -217,6 +217,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captains-log-machine-projection.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -247,6 +251,10 @@
     {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/fm-bridge-v2.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/fm-test-isolation-proof.md",
@@ -282,6 +290,10 @@
     },
     {
       "path": "docs/sessionstart-nudge.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/shapeup-client.md",
       "audience": "operator-current"
     },
     {

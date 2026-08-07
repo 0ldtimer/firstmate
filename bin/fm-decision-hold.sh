@@ -22,6 +22,9 @@
 #     --title <title> --reason <reason> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
+#   fm-decision-hold.sh project <origin-id> <decision-key> \
+#     --packet-file <path> --lifecycle <raised|updated|resolving>
+#   fm-decision-hold.sh status <origin-id> <decision-key> --json
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #
@@ -118,6 +121,7 @@ show_field() {  # <show-output> <field>
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
+  [ -f "$DATA/engineering/missions/$1.json" ] && return 0
   task_show "$1" >/dev/null 2>&1
 }
 
@@ -367,6 +371,97 @@ EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+command_project() {
+  local origin=${1:-} key=${2:-} packet_file='' lifecycle='' id packet packet_revision packet_record body hold_body
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --packet-file) shift; packet_file=${1:-} ;;
+      --lifecycle) shift; lifecycle=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  case "$lifecycle" in raised|updated|resolving) ;; *) fail "lifecycle must be raised, updated, or resolving" ;; esac
+  [ -f "$packet_file" ] || fail "packet file does not exist: $packet_file"
+  packet=$(jq -ce 'select(type == "object" and (.condition | type == "object"))' "$packet_file" 2>/dev/null) \
+    || fail "packet file must contain one structured condition"
+  packet_revision=$(printf '%s' "$packet" | jq -r '.condition.packetRevision // empty')
+  [ -n "$packet_revision" ] || fail "packet revision is missing"
+  packet_record=$(printf '%s' "$packet" | jq -r '.reportId // empty')
+  [ -n "$packet_record" ] || fail "packet record identity is missing"
+  validate_slug packet-record "$packet_record"
+  id=$(hold_id "$origin" "$key")
+  require_tasks_axi
+  verify_hold_active "$id"
+  # A hold that already carries a resolution record is mid-resolution: that
+  # record is the retry identity `resolve` needs to finish a partially completed
+  # routing operation, so projecting a packet over it would make the hold
+  # permanently unresolvable.
+  hold_body=$(show_field "$(task_show "$id")" body)
+  case "$hold_body" in
+    *"Resolution recorded by fm-decision-hold."*)
+      printf 'retained: %s %s resolution-record\n' "$id" "$lifecycle"
+      return 0
+      ;;
+  esac
+  body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.\n\nFirstMate Captain Call packet.\nLifecycle: %s\nPacket record: %s\nPacket revision: %s' \
+    "$origin" "$key" "$lifecycle" "$packet_record" "$packet_revision")
+  tasks_axi update "$id" --body "$body" >/dev/null \
+    || fail "could not project Captain Call packet on $id"
+  printf 'projected: %s %s\n' "$id" "$lifecycle"
+}
+
+command_status() {
+  local origin=${1:-} key=${2:-} id show state held body lifecycle packet_revision packet_record packet_file
+  [ "$#" -eq 3 ] && [ "$3" = --json ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  require_tasks_axi
+  id=$(hold_id "$origin" "$key")
+  show=$(task_show "$id") || fail "captain hold $id is absent"
+  state=$(show_field "$show" state)
+  held=$(show_field "$show" held)
+  body=$(show_field "$show" body)
+  packet_revision=$(printf '%s\n' "$body" | sed -n 's/.*Packet revision: \([^\\"]*\).*/\1/p' | head -1)
+  packet_record=$(printf '%s\n' "$body" | sed -n 's/.*Packet record: \([^\\"]*\).*/\1/p' | head -1)
+  packet_file=''
+  case "$packet_record" in
+    ''|*[!A-Za-z0-9._-]*) ;;
+    *) packet_file="$DATA/engineering/reports/$packet_record.json" ;;
+  esac
+  if [ "$state" = "done" ]; then
+    lifecycle=resolved
+  else
+    lifecycle=$(printf '%s\n' "$body" | sed -n 's/.*Lifecycle: \([^\\"]*\).*/\1/p' | head -1)
+    case "$lifecycle" in
+      raised|updated|resolving) ;;
+      *)
+        if [ -f "$packet_file" ]; then
+          lifecycle=$(jq -r '.condition.lifecycle // "raised"' "$packet_file" 2>/dev/null || printf raised)
+        else
+          lifecycle=raised
+        fi
+        ;;
+    esac
+  fi
+  jq -n --arg conditionId "$key" --arg holdId "$id" --arg lifecycle "$lifecycle" \
+    --arg packetRevision "$packet_revision" \
+    --arg state "$state" --arg held "$held" '
+    {
+      schemaVersion:"fm-captain-call-status.v1",
+      conditionId:$conditionId,
+      holdId:$holdId,
+      lifecycle:$lifecycle,
+      packetRevision:(if $packetRevision == "" then null else $packetRevision end),
+      durableState:{state:$state,held:($held == "yes")}
+    }
+  '
+}
+
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -458,6 +553,8 @@ case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  project) shift; command_project "$@" ;;
+  status) shift; command_status "$@" ;;
   resolve) shift; command_resolve "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;

@@ -1,0 +1,11 @@
+{
+  "protocolRevision": "engineering-scotty.v1",
+  "kind": "progress-intent",
+  "intentId": "intent:task-42:7",
+  "executionId": "execution:cycle-13",
+  "taskId": "task-42",
+  "crewmateId": "crewmate:keiko",
+  "shapeUp": {"buildId": "build-8", "scopeId": "scope-context", "hillPosition": 2, "observation": "uncertainty reduced"},
+  "evidence": [{"kind": "automated", "reference": "evidence:task-42:7", "verification": "verified"}],
+  "disposition": "pending"
+}

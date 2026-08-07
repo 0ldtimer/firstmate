@@ -1,0 +1,9 @@
+{
+  "protocolRevision": "engineering-scotty.v1",
+  "kind": "project-binding",
+  "workspaceId": "workspace-13",
+  "cycleId": "cycle-13",
+  "buildId": "build-8",
+  "repository": {"identity": "repo:captainslog", "root": "/approved/projects/captainslog", "baseRevision": "0123456789abcdef0123456789abcdef01234567"},
+  "manifestDigest": "sha256:manifest-build-8-v1"
+}

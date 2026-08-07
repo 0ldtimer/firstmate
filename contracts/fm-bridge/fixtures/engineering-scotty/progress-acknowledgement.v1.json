@@ -1,0 +1,10 @@
+{
+  "protocolRevision": "engineering-scotty.v1",
+  "kind": "progress-acknowledgement",
+  "acknowledgementId": "ack:intent:task-42:7",
+  "intentId": "intent:task-42:7",
+  "executionId": "execution:cycle-13",
+  "disposition": "applied",
+  "effectCount": 1,
+  "resultDigest": "sha256:result-intent-task-42-7"
+}
