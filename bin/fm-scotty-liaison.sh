@@ -30,17 +30,22 @@ fail() { printf 'liaison: %s\n' "$*" >&2; }
 json_error() { jq -cn --arg code "$1" --arg message "$2" '{accepted:false,protocolVersion:"fm-bridge.v2",operation:"scottyDelegation",error:{code:$code,message:$message}}'; }
 
 take_execution_wakes() {
-  local queue="$FM_WAKE_QUEUE" tmp rows
+  local queue="$FM_WAKE_QUEUE" pid tmp next rows
   mkdir -p "$STATE" "$FM_CYCLE_LIAISON" || return 1
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  tmp="$STATE/.wake-queue.liaison.$(fm_current_pid)"
+  # One pid names both temp files. fm_current_pid reports BASHPID, which is the
+  # pid of the command substitution's own subshell, so expanding it twice names
+  # two different files and the rewritten queue is never moved into place.
+  pid=$(fm_current_pid)
+  tmp="$STATE/.wake-queue.liaison.$pid"
+  next="$queue.next.$pid"
   rm -f "$tmp"
   [ -f "$queue" ] || : > "$queue"
   awk -F '\t' -v out="$tmp" '
     NF >= 5 && $3 == "signal" && $4 ~ /^execution:/ { print $0 >> out; next }
     { print $0 }
-  ' "$queue" > "$queue.next.$(fm_current_pid)" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
-  mv "$queue.next.$(fm_current_pid)" "$queue" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  ' "$queue" > "$next" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  mv "$next" "$queue" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
   rows=$(cat "$tmp" 2>/dev/null || true)
   rm -f "$tmp"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
