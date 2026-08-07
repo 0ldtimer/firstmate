@@ -75,6 +75,16 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+# insert_backlog_line_after <file> <match-substring> <line>: print <file> to stdout
+# with <line> inserted after every line containing <match-substring>. awk owns this
+# rather than `sed '/x/a\<newline>text'`, whose appended text BSD sed (macOS) emits
+# with no trailing newline - gluing it onto the next line and silently destroying
+# the following section heading.
+insert_backlog_line_after() {  # <file> <match-substring> <line>
+  awk -v match_text="$2" -v ins="$3" \
+    '{ print } index($0, match_text) { print ins }' "$1"
+}
+
 record_claude_state() {  # <state-dir> <id> <busy|idle>
   local state=$1 id=$2 semantic_state=$3 gen event
   case "$semantic_state" in
@@ -1690,9 +1700,12 @@ EOF
         and (.reason | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
 
-  sed '/unreadable-child/a\
-- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  # awk, not `sed '/x/a\<newline>text'`: BSD sed (macOS) emits the appended text
+  # WITHOUT a trailing newline, gluing it onto the following line - which silently
+  # destroys the next section heading and the backlog rows this suite asserts on.
+  insert_backlog_line_after "$sshhip/data/backlog.md" unreadable-child \
+    '- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
+    > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
@@ -1729,9 +1742,9 @@ EOF
       and .landed == []
       and .endpoints == []
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
-  sed '/## In flight/a\
-- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  insert_backlog_line_after "$sshhip/data/backlog.md" '## In flight' \
+    '- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
+    > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
   fm_write_meta "$wheel/state/production-observation.meta" \

@@ -215,10 +215,18 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. Each arm removes
+  # its own matched LITERAL rather than a `?` wildcard count: `?` matches one
+  # BYTE under a C/POSIX locale (no LANG/LC_ALL set, e.g. the away-mode daemon
+  # started from launchd), so a `?` strip leaves a partial UTF-8 sequence behind
+  # for the multibyte agent glyphs and reads an idle composer as `pending`. The
+  # whitespace trim below removes any space that followed the glyph, so no arm
+  # needs to account for one.
   case "$content" in
-    '❯ '*|'› '*|'⟩ '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'⟩'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '⟩'*) content=${content#'⟩'} ;;
+    '>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

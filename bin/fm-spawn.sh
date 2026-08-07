@@ -2226,7 +2226,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" \
+  || { echo "error: could not publish task metadata to $STATE/$ID.meta" >&2; exit 1; }
+# The explicit failure branch above is load-bearing, not belt-and-braces: bash
+# 3.2 (the system /bin/bash on macOS) does NOT apply `set -e` to a redirection
+# failure on a COMPOUND command, so without it an unwritable meta path would let
+# the spawn clear ORCA_ABORT_CLEANUP below and report success while the task has
+# no metadata and its backend terminal/worktree leak.
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

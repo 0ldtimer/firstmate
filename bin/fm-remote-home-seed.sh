@@ -157,7 +157,10 @@ done < "$BRIEF" > "$TMP/charter.remote"
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+# The +-guarded expansion is required: under `set -u`, bash 3.2 (the system
+# /bin/bash on macOS) treats an EMPTY array expansion as an unbound variable, so
+# a --no-projects home would abort here before it could provision anything.
+for project in ${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")

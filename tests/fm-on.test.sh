@@ -54,8 +54,12 @@ case "\${1:-}:\${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
+# fm-composer-lib.sh and fm-transition-lib.sh are the siblings
+# bin/backends/herdr.sh sources unconditionally; without them the adapter aborts
+# the moment the doctor loads a backend, and every later check goes unreported.
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-composer-lib.sh" \
+  "$ROOT/bin/fm-transition-lib.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'

@@ -595,6 +595,14 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # Probe the adapter before sourcing it. Under `set -e`, bash 3.2 (the system
+  # /bin/bash on macOS) TERMINATES the shell when `.` cannot find its file - the
+  # `|| return 1` below never runs - so a caller that means to handle a missing
+  # adapter (bin/fm-teardown.sh's herdr preflight refusal) would instead die
+  # mid-teardown with only bash's own "No such file" line. fm_backend_validate
+  # above has already restricted <name> to the known adapter set, and every
+  # adapter file is exactly backends/<name>.sh.
+  [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
