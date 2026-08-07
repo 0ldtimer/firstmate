@@ -69,7 +69,7 @@ LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 
 # Private tmux server with a supervisor session.
@@ -98,11 +98,13 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
+  # Literal prefix match, not ${_line:0:1}: substring expansion counts BYTES
+  # under a C/POSIX locale, so it would compare only the first of the marker's
+  # three UTF-8 bytes and read every injection as a user submission.
+  case "$_line" in
+    "$MARK"*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=

@@ -41,6 +41,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
@@ -68,7 +73,7 @@ trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -91,6 +96,30 @@ $TASK_IDS
 EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"
 SUPERVISOR_TARGET="$SESSION:$PANE_ID"
+
+# Herdr can return the created pane before its interactive shell is ready to
+# receive Enter. Require a stable shell-owned foreground before launching the
+# fixture, or the command can remain typed but unsubmitted in the shell buffer.
+PANE_READY=false
+READY_SAMPLES=0
+for _ in $(seq 1 100); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    READY_SAMPLES=$((READY_SAMPLES + 1))
+    if [ "$READY_SAMPLES" -ge 10 ]; then
+      PANE_READY=true
+      break
+    fi
+  else
+    READY_SAMPLES=0
+  fi
+  sleep 0.1
+done
+[ "$PANE_READY" = true ] || fail "the supervisor pane's shell did not become ready"
 
 # A second, independent live task tab in the same workspace, mirroring the tmux
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
@@ -164,11 +193,13 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
+  # Literal prefix match, not ${_line:0:1}: substring expansion counts BYTES
+  # under a C/POSIX locale, so it would compare only the first of the marker's
+  # three UTF-8 bytes and read every injection as a user submission.
+  case "$_line" in
+    "$MARK"*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=

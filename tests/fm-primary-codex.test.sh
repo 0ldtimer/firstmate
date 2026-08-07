@@ -30,6 +30,7 @@ FM_TEST_ROOT="$ROOT" FM_HOME="$TMP/home" FM_CODEX_BIN="$TMP/bin/codex" PATH="/us
 grep -Fq -- "--add-dir $TMP/home" "$TMP/home/args-seen" || fail "launcher did not grant access to FM_HOME"
 [ ! -e "$TMP/home/state/.lock" ] || fail "launcher did not release the PID lock on exit"
 [ ! -e "$TMP/home/state/.lock-token" ] || fail "launcher did not release the token lock on exit"
-[ ! -e "$TMP/home/state/.lock-claim" ] || fail "launcher did not release the atomic claim on exit"
+{ [ ! -e "$TMP/home/state/.lock.acquire" ] && [ ! -L "$TMP/home/state/.lock.acquire" ]; } \
+  || fail "launcher did not release the acquisition claim lock on exit"
 
 echo "PASS: Codex launcher propagates ownership and cleans up on exit"
