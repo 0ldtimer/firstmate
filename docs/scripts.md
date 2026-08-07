@@ -117,10 +117,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 ## Captain's Log Bridge
 
 `bin/fm-bridge.sh` is the supported local machine boundary for voice-first fleet clients.
-It reads one `fm-bridge.v1` JSON request from standard input. The `snapshot` operation
-projects stable task identities, revisions, evidence pointers, freshness, and legal
-capabilities from `fm-fleet-snapshot.v1`. The `command` operation requires a command ID,
-opaque task ID, and expected task revision. Repeated identical command IDs replay their
-original outcome, while reuse with a different request fails closed. Sign-off is a review
-decision and never implies merge; merge remains unavailable unless FirstMate can route it
-through a guarded project mode.
+It reads one `fm-bridge.v1` JSON request from standard input.
+The `snapshot` operation projects stable task identities, revisions, evidence pointers, freshness, and legal capabilities from `fm-fleet-snapshot.v1`.
+The `command` operation requires a command ID, opaque task ID, and expected task revision.
+Repeated identical command IDs replay their original outcome, while reuse with a different request fails closed.
+Sign-off is a review decision and never implies merge.
+Merge remains unavailable unless FirstMate can route it through a guarded project mode.

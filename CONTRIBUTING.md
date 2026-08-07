@@ -13,9 +13,27 @@ A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and 
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
+## Fork boundary
+
+This repository is a maintained fork of [`kunchenguid/firstmate`](https://github.com/kunchenguid/firstmate).
+Upstream is a read-only sync source: pull its baseline in, but do not raise pull requests against it from here.
+Branches and pull requests in this repo target this fork's `main`.
+
+A few surfaces exist only in this fork and must survive every upstream sync.
+Each fact stays in the owner document named beside it rather than being restated in a sync commit.
+
+| Fork-only surface | Scripts | Owner document |
+|---|---|---|
+| Codex primary launcher | `bin/fm-primary-codex.sh` | [README.md](README.md) ("Codex") |
+| Codex session-token and launcher-pid fleet-lock ownership | `bin/fm-lock.sh`, `bin/fm-session-lock-lib.sh` | [docs/watcher-continuity.md](docs/watcher-continuity.md) |
+| Captain's Log Bridge | `bin/fm-bridge.sh`, `bin/fm-bridge-lib.sh` | [docs/architecture.md](docs/architecture.md#bridge-protocol-boundary) and [docs/scripts.md](docs/scripts.md#captains-log-bridge) |
+
+An upstream sync that touches these files conflicts by design.
+Resolve by combining upstream's newer implementation with the fork's ownership rules rather than dropping either side.
+
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
+1. Fork this repo, then clone it or set your local `origin` back to it (`git@github.com:0ldtimer/firstmate.git`).
 2. Create a branch and make your changes.
 3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
 4. Commit your changes.
@@ -27,7 +45,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against this repo for you.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
