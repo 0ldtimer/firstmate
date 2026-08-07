@@ -12,7 +12,10 @@
 #      binaries and fixtures as the REFACTORED versions in this checkout, then
 #      diffs the two command logs byte-for-byte - the report's P1 checklist
 #      item "run current main scripts and refactored scripts against the same
-#      fake tools and compare command logs". The teardown old-vs-new case also
+#      fake tools and compare command logs". The send old-vs-new case diffs the
+#      pane-MUTATING commands only: its read-only probes are excluded from the
+#      diff and asserted by shape instead (see strip_send_readonly_probes).
+#      The teardown old-vs-new case also
 #      overlays a content-historical permissive tmux kill fixture: after the
 #      exact-selector change lands on the default branch, merge-base with main
 #      collapses to HEAD and can no longer supply that baseline.
@@ -666,10 +669,27 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
-strip_send_preflight() {  # <log>
-  local preflight
+# Drops the two READ-ONLY reads the old-vs-new command-log diff must not police,
+# leaving every pane-MUTATING command (send-keys) in the diff - which is what the
+# P1 checklist item is about:
+#   - the pane_id preflight, a new-only explicit-target verification (asserted
+#     directly, by shape, in case 1 below).
+#   - the styled composer-state pane read (capture-pane -e). The reader in
+#     bin/fm-tmux-lib.sh now scans the WHOLE pane for a composer box before
+#     falling back to the single cursor row, so its -S/-E bound legitimately
+#     differs from a baseline predating that structural scan. The bound is not
+#     free-floating: the read's shape is asserted directly in case 2 below, and
+#     the structural multi-row scan itself is owned by
+#     tests/fm-composer-ghost.test.sh.
+strip_send_readonly_probes() {  # <log>
+  local preflight composer_read
   preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  composer_read=$'tmux\x1fcapture-pane\x1f-e\x1f'
+  awk -v preflight="$preflight" -v composer_read="$composer_read" '
+    $0 == preflight { next }
+    index($0, composer_read) == 1 { next }
+    { print }
+  ' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -688,8 +708,8 @@ test_send_conformance_old_vs_new() {
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
   assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
+  strip_send_readonly_probes "$log_old" > "$filtered_old"
+  strip_send_readonly_probes "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
     || fail "fm-send --key: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-key.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''Escape' "fm-send --key did not send the named key"
@@ -700,13 +720,15 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
+  strip_send_readonly_probes "$log_old" > "$filtered_old"
+  strip_send_readonly_probes "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
     || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
   assert_contains "$(cat "$log_new")" $'\x1f''Enter' "fm-send did not submit with Enter"
+  assert_contains "$(cat "$log_new")" $'\x1f''capture-pane'$'\x1f''-e'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''0'$'\x1f''-E'$'\x1f''-' \
+    "fm-send's composer read must still scan the whole pane for the composer box"
 
   # Case 3: a slash command still opens the popup-settle path (verified
   # elsewhere in tests/fm-send-popup-settle.test.sh) and still ends in the
@@ -716,8 +738,8 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
+  strip_send_readonly_probes "$log_old" > "$filtered_old"
+  strip_send_readonly_probes "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
     || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
 
